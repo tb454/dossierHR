@@ -1,0 +1,67 @@
+[
+  {
+    "id": "WINSKI-0421-MB",
+    "name": "Michelle Bright",
+    "title": "Large-Scale Operator & Office Manager",
+    "location": "Main Yard Office",
+    "trustScore": 4.7,
+    "latestReview": 4.9,
+    "certs": "OSHA 10, ERP Admin, Data Security 101",
+    "risk": "Low",
+    "milestone": "ERP System Revamp – Q4 2025",
+    "email": "michelle.bright@winskibro.com",
+    "shift": "Mon–Fri, 7am–4pm"
+  },
+  {
+    "id": "WINSKI-0421-GB",
+    "name": "Gerry Bright",
+    "title": "Crane Operator / CDL A / Equip Lead",
+    "location": "Yard 1 – East Pit",
+    "trustScore": 4.6,
+    "latestReview": 4.8,
+    "certs": "CDL A, Heavy Equip Operator, Lockout/Tagout",
+    "risk": "High",
+    "milestone": "Remote lift module – Q1 2026",
+    "email": "gerry.bright@winskibro.com",
+    "shift": "Mon–Sat, 6am–3:30pm"
+  },
+  {
+    "id": "WINSKI-0421-FK",
+    "name": "Fran Kinsler",
+    "title": "Roll-Off CDL Driver / Certified Operator",
+    "location": "Mobile – Regional Route",
+    "trustScore": 4.8,
+    "latestReview": 4.7,
+    "certs": "CDL A, DOT Clearance, Harassment Prevention",
+    "risk": "Moderate",
+    "milestone": "Back-up yard cert – Q3 2025",
+    "email": "fran.kinsler@winskibro.com",
+    "shift": "Variable (Mon–Sat)"
+  },
+  {
+    "id": "WINSKI-0421-TX",
+    "name": "Tracy",
+    "title": "Torchman",
+    "location": "Torch Bay, Main Yard",
+    "trustScore": 4.5,
+    "latestReview": 4.6,
+    "certs": "Torch Safety, PPE/Fire Protocol, Flame Clearance",
+    "risk": "Very High",
+    "milestone": "Tank dismantle cert",
+    "email": "tracy@winskibro.com",
+    "shift": "Mon–Fri, 6:30am–3pm"
+  },
+  {
+    "id": "WINSKI-0421-JB",
+    "name": "Jacob",
+    "title": "Non-Ferrous Scale Op / Material Processor",
+    "location": "NF Building – East Wing",
+    "trustScore": 4.9,
+    "latestReview": 5.0,
+    "certs": "Forklift, Light Equip Op, NF Grading Basics",
+    "risk": "Moderate",
+    "milestone": "NF Cert Level II – Q4 2025",
+    "email": "jacob@winskibro.com",
+    "shift": "Mon–Fri, 7am–3:30pm"
+  }
+]
