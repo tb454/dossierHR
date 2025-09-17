@@ -106,6 +106,42 @@ def db():
     return psycopg.connect(DB_URL, autocommit=True, row_factory=dict_row)
 
 # --------------------------
+# Passive ingestion (for BRidge, HR, Vayudeck)
+# --------------------------
+class DossierEvent(BaseModel):
+    user_id: str
+    source_product: str   # "BRidge", "Vayudeck", etc.
+    activity_type: str    # "contract_posted", "motion_detected", etc.
+    raw_data: dict
+    timestamp: Optional[datetime] = None  # allow sender to omit
+
+@app.post("/dossier-dump", tags=["Sync"], summary="Passive nightly dump from other platforms")
+def dossier_dump(e: DossierEvent):
+    with db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dossier_behavior_log (
+              id UUID PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              source_product TEXT NOT NULL,
+              activity_type TEXT NOT NULL,
+              raw_data JSONB,
+              timestamp TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
+            INSERT INTO dossier_behavior_log (id, user_id, source_product, activity_type, raw_data, timestamp)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (
+            str(uuid.uuid4()),
+            e.user_id,
+            e.source_product,
+            e.activity_type,
+            json.dumps(e.raw_data),
+            e.timestamp or datetime.utcnow()
+        ))
+    return {"ok": True}
+
+# --------------------------
 # Schemas
 # --------------------------
 class LoginIn(BaseModel):
