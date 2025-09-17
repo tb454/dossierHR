@@ -28,12 +28,29 @@ ENV = os.getenv("ENV", "development")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev_secret_change_me")
 HOSTS = [h.strip() for h in os.getenv("HOSTS", "localhost,127.0.0.1").split(",")]
 DB_URL = os.getenv("DATABASE_URL")
-BRIDGE_SYNC_HMAC_SECRET = os.getenv("BRIDGE_SYNC_HMAC_SECRET", "dev_hmac")
+BRIDGE_SYNC_HMAC_SECRET = os.getenv("BRIDGE_SYNC_HMAC_SECRET", "dev_hmac")  # kept for backward compat if you ever need it
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET", "dev_ingest")
 PROM_ENABLED = os.getenv("PROM_ENABLED", "true").lower() == "true"
 
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@dossierhr.local")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")  # bcrypt hash
+
+# ===== Multi-product HMAC secrets (NEW) =====
+PRODUCT_SECRETS = {
+    "bridge": os.getenv("BRIDGE_SYNC_HMAC_SECRET", ""),
+    "truck_tunnel": os.getenv("TRUCK_TUNNEL_HMAC_SECRET", ""),
+    "polevolt": os.getenv("POLEVOLT_HMAC_SECRET", ""),
+    "oceangrid": os.getenv("OCEANGRID_HMAC_SECRET", ""),
+    "vayudeck": os.getenv("VAYUDECK_HMAC_SECRET", ""),
+    "loct": os.getenv("LOCT_HMAC_SECRET", ""),
+    "starhop": os.getenv("STARHOP_HMAC_SECRET", ""),
+}
+
+def _verify_hmac_by_product(body: bytes, header_sig: Optional[str], product: str) -> None:
+    secret = PRODUCT_SECRETS.get(product) or ""
+    mac = hmac.new(secret.encode(), body or b"", hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(mac, header_sig or ""):
+        raise HTTPException(401, "Invalid signature")
 
 # --------------------------
 # App
@@ -407,36 +424,48 @@ def download_dump(dump_id: str, request: Request):
     return FileResponse(row["file_path"], filename=os.path.basename(row["file_path"]))
 
 # --------------------------
-# BRidge → Dossier HR sync (HMAC)
+# Portfolio-wide ingest (NEW)
 # --------------------------
-def verify_hmac(body: bytes, header_sig: str, secret: str):
-    mac = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(mac, header_sig or ""):
-        raise HTTPException(401, "Invalid signature")
-
-@app.post("/sync/bridge", tags=["Sync"], summary="Ingest BRidge nightly memory dump (HMAC)")
-def sync_bridge(request: Request, x_signature: Optional[str] = Header(None)):
-    body = request.scope.get("_body")
-    if body is None:
-        body = b""
-    verify_hmac(body, x_signature, BRIDGE_SYNC_HMAC_SECRET)
+@app.post("/sync/{product}", tags=["Sync"], summary="Ingest signed events from any Atlas build")
+def sync_product(
+    product: str,
+    request: Request,
+    x_signature: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None)
+):
+    body = request.scope.get("_body") or b""
+    _verify_hmac_by_product(body, x_signature, product)
 
     try:
         payload = json.loads(body.decode() or "{}")
     except Exception:
         raise HTTPException(400, "Invalid JSON")
 
-    # Example: expect { "events": [ { "type":"contract","data":{...}}, ... ] }
     processed = 0
     with db() as conn:
+        # ensure idempotency table exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ingest_ids (
+              id TEXT PRIMARY KEY,
+              created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        if idempotency_key:
+            exists = conn.execute("SELECT 1 FROM ingest_ids WHERE id=%s", (idempotency_key,)).fetchone()
+            if exists:
+                return {"ok": True, "product": product, "deduped": True, "processed": 0}
+            conn.execute("INSERT INTO ingest_ids (id) VALUES (%s)", (idempotency_key,))
+
         for e in payload.get("events", []):
-            # Store raw into hr_records for now
+            # tag the source for analytics
+            e["source"] = product
             conn.execute(
                 "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-                (e.get("profile_id"), "bridge_event", json.dumps(e))
+                (e.get("profile_id"), f"{product}_event", json.dumps(e))
             )
             processed += 1
-    return {"ok": True, "processed": processed}
+
+    return {"ok": True, "product": product, "processed": processed}
 
 # --------------------------
 # Legal pages (stubs)
