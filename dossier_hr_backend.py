@@ -1,6 +1,7 @@
 import os, uuid, json, hashlib, hmac, time
 from datetime import datetime
 from typing import Optional, List, Annotated
+from fastapi.staticfiles import StaticFiles
 
 import structlog
 from dotenv import load_dotenv
@@ -61,6 +62,9 @@ app = FastAPI(
     description="Industrial-grade HR/Review/Verification backend for Dossier.",
 )
 
+# Serve /static/* (HTML/JS/JSON)
+app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+
 # Security headers (CSP, frame, etc.)
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -106,7 +110,7 @@ def db():
     return psycopg.connect(DB_URL, autocommit=True, row_factory=dict_row)
 
 # --------------------------
-# Passive ingestion (for BRidge, HR, Vayudeck)
+# Passive ingestion 
 # --------------------------
 class DossierEvent(BaseModel):
     user_id: str
@@ -140,6 +144,7 @@ def dossier_dump(e: DossierEvent):
             e.timestamp or datetime.utcnow()
         ))
     return {"ok": True}
+
 
 # --------------------------
 # Schemas
@@ -242,6 +247,14 @@ def login(payload: LoginIn, request: Request):
 def logout(request: Request):
     request.session.clear()
     return {"ok": True}
+
+@app.get("/me", tags=["Auth"], summary="Return current session identity")
+def me(request: Request):
+    return {
+        "ok": True,
+        "email": request.session.get("user"),
+        "role": request.session.get("role")
+    }
 
 # --------------------------
 # Profiles

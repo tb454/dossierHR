@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Manager | Dossier HR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="/static/auth.js"></script>
+  <script defer src="/static/viewer.js"></script>
+</head>
+<body class="min-h-screen bg-gray-50">
+  <header class="bg-white shadow p-4 flex items-center justify-between">
+    <h1 class="text-xl font-semibold">Manager Dashboard</h1>
+    <div class="flex items-center space-x-3">
+      <a href="/static/employee.html" class="text-sm text-blue-600 hover:underline">My View</a>
+      <span id="whoami" class="text-sm text-gray-600"></span>
+      <button id="logoutBtn" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300">Logout</button>
+    </div>
+  </header>
+
+  <main class="p-4">
+    <div id="profile-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+  </main>
+
+  <script>
+    (async function init() {
+      const me = await requireRole(["manager","admin"]); // managers & admins
+      document.getElementById("whoami").textContent = `${me.email} (${me.role})`;
+
+      const profiles = await loadProfiles();
+      renderProfiles(profiles, document.getElementById("profile-container"));
+
+      document.getElementById("logoutBtn").onclick = async () => {
+        await fetch("/logout", { method: "POST", credentials: "include" });
+        location.href = "/static/login.html";
+      };
+    })();
+  </script>
+</body>
+</html>
