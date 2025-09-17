@@ -1,13 +1,14 @@
 import os, uuid, json, hashlib, hmac, time
 from datetime import datetime
 from typing import Optional, List, Annotated
-from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 import structlog
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Header, Query, HTTPException, Depends
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -64,6 +65,7 @@ app = FastAPI(
 
 # Serve /static/* (HTML/JS/JSON)
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+STATIC_DIR = Path("static")
 
 # Security headers (CSP, frame, etc.)
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -73,7 +75,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["Referrer-Policy"] = "no-referrer"
         resp.headers["X-XSS-Protection"] = "0"
-        resp.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; frame-ancestors 'none';"
+        # Allow Tailwind CDN for your static pages; keep strict elsewhere
+        # If you self-host Tailwind later, you can revert to 'self' only.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "img-src 'self' data:; "
+            "script-src 'self' https://cdn.tailwindcss.com; "
+            "style-src 'self' 'unsafe-inline'; "
+            "frame-ancestors 'none';"
+        )
+        # HSTS in prod only (bonus hardening)
+        if ENV == "production":
+            resp.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
         return resp
 
 app.add_middleware(SecurityHeadersMiddleware)
@@ -90,6 +103,7 @@ app.add_middleware(
 
 # Rate limit
 limiter = Limiter(key_func=get_remote_address)
+
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request.state.request_id = str(uuid.uuid4())
@@ -110,7 +124,7 @@ def db():
     return psycopg.connect(DB_URL, autocommit=True, row_factory=dict_row)
 
 # --------------------------
-# Passive ingestion 
+# Passive ingestion
 # --------------------------
 class DossierEvent(BaseModel):
     user_id: str
@@ -144,7 +158,6 @@ def dossier_dump(e: DossierEvent):
             e.timestamp or datetime.utcnow()
         ))
     return {"ok": True}
-
 
 # --------------------------
 # Schemas
@@ -255,6 +268,36 @@ def me(request: Request):
         "email": request.session.get("user"),
         "role": request.session.get("role")
     }
+
+# --------------------------
+# Server-side role-gated UI routes (belt & suspenders)
+# --------------------------
+def _serve_html(name: str) -> HTMLResponse:
+    path = STATIC_DIR / name
+    if not path.exists():
+        raise HTTPException(404, "Page not found")
+    return HTMLResponse(path.read_text(encoding="utf-8"))
+
+@app.get("/dashboard/employee", tags=["UI"], summary="Employee dashboard (role-gated)")
+def ui_employee(request: Request):
+    role = request.session.get("role")
+    if role not in ("employee", "manager", "admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_html("employee.html")
+
+@app.get("/dashboard/manager", tags=["UI"], summary="Manager dashboard (role-gated)")
+def ui_manager(request: Request):
+    role = request.session.get("role")
+    if role not in ("manager", "admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_html("manager.html")
+
+@app.get("/dashboard/admin", tags=["UI"], summary="Admin dashboard (role-gated)")
+def ui_admin(request: Request):
+    role = request.session.get("role")
+    if role != "admin":
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_html("admin.html")
 
 # --------------------------
 # Profiles
@@ -449,7 +492,7 @@ def reviews_by_day(days: int = Query(30, ge=1, le=365)):
 # --------------------------
 # Nightly dump (CSV-like JSONL) + export
 # --------------------------
-@app.post("/admin/run_nightly_dump", tags=["Data"], summary="Run nightly dump (admin)")
+@app.post("/admin/run_nightly_dump", tags=["Data"], summary="Run nightly dump (admin)"]
 def run_dump(request: Request):
     require_admin(request)
     run_id = str(uuid.uuid4())
@@ -473,16 +516,16 @@ def download_dump(dump_id: str, request: Request):
     return FileResponse(row["file_path"], filename=os.path.basename(row["file_path"]))
 
 # --------------------------
-# Portfolio-wide ingest (NEW)
+# Portfolio-wide ingest (signed, idempotent)
 # --------------------------
 @app.post("/sync/{product}", tags=["Sync"], summary="Ingest signed events from any Atlas build")
-def sync_product(
+async def sync_product(
     product: str,
     request: Request,
     x_signature: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None)
 ):
-    body = request.scope.get("_body") or b""
+    body = await request.body()
     _verify_hmac_by_product(body, x_signature, product)
 
     try:
