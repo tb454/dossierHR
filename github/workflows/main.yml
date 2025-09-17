@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ENV: ci
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      BRIDGE_SYNC_HMAC_SECRET: ${{ secrets.BRIDGE_SYNC_HMAC_SECRET }}
+      POLEVOLT_HMAC_SECRET: ${{ secrets.POLEVOLT_HMAC_SECRET }}
+      OCEANGRID_HMAC_SECRET: ${{ secrets.OCEANGRID_HMAC_SECRET }}
+      VAYUDECK_HMAC_SECRET: ${{ secrets.VAYUDECK_HMAC_SECRET }}
+      LOCT_HMAC_SECRET: ${{ secrets.LOCT_HMAC_SECRET }}
+      STARHOP_HMAC_SECRET: ${{ secrets.STARHOP_HMAC_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -q
