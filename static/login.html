@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Dossier HR Login</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="flex items-center justify-center h-screen bg-gray-100">
+  <form id="loginForm" class="bg-white p-6 rounded shadow w-96 space-y-4">
+    <h2 class="text-xl font-bold text-center">Dossier HR Login</h2>
+    <input type="email" id="email" placeholder="Email" class="w-full border p-2 rounded" required />
+    <input type="password" id="password" placeholder="Password" class="w-full border p-2 rounded" required />
+    <button type="submit" class="w-full bg-blue-600 text-white p-2 rounded">Login</button>
+    <p id="error" class="text-red-500 text-sm text-center hidden">Invalid credentials</p>
+  </form>
+
+  <script>
+    document.getElementById("loginForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+
+      const res = await fetch("/login", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+      if (data.ok) {
+        if (data.role === "admin") {
+          window.location.href = "admin.html";
+        } else if (data.role === "manager") {
+          window.location.href = "manager.html";
+        } else {
+          window.location.href = "employee.html";
+        }
+      } else {
+        document.getElementById("error").classList.remove("hidden");
+      }
+    };
+  </script>
+</body>
+</html>
