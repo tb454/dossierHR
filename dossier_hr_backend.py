@@ -492,7 +492,7 @@ def reviews_by_day(days: int = Query(30, ge=1, le=365)):
 # --------------------------
 # Nightly dump (CSV-like JSONL) + export
 # --------------------------
-@app.post("/admin/run_nightly_dump", tags=["Data"], summary="Run nightly dump (admin)")]
+@app.post("/admin/run_nightly_dump", tags=["Data"], summary="Run nightly dump (admin)")
 def run_dump(request: Request):
     require_admin(request)
     run_id = str(uuid.uuid4())
