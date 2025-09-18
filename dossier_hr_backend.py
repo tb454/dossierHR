@@ -470,11 +470,17 @@ def approve_verification(verification_id: str, request: Request):
 # Shadowban
 # --------------------------
 @app.post("/admin/shadowban/{profile_id}", tags=["Moderation"], summary="Shadowban a profile")
-def shadowban(profile_id: str, reason: Optional[str]=None, request: Request=Depends()):
+def shadowban(profile_id: str, request: Request, reason: Optional[str] = None):
     require_manager_or_admin(request)
     with db() as conn:
-        conn.execute("INSERT INTO shadowbans (profile_id, reason, active) VALUES (%s,%s,TRUE)", (profile_id, reason))
-        conn.execute("INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'shadowban',%s)", (profile_id, json.dumps({"reason": reason})))
+        conn.execute(
+            "INSERT INTO shadowbans (profile_id, reason, active) VALUES (%s,%s,TRUE)",
+            (profile_id, reason)
+        )
+        conn.execute(
+            "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'shadowban',%s)",
+            (profile_id, json.dumps({"reason": reason}))
+        )
     return {"ok": True}
 
 # --------------------------
