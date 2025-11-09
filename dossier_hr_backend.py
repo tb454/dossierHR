@@ -20,6 +20,9 @@ import bcrypt
 import psycopg
 from psycopg.rows import dict_row
 
+from scraper_router import router as scraper_router
+from urllib.parse import urlparse
+
 # --------------------------
 # Env & logging
 # --------------------------
@@ -62,6 +65,7 @@ app = FastAPI(
     version="1.0.0",
     description="Industrial-grade HR/Review/Verification backend for Dossier.",
 )
+app.include_router(scraper_router)
 
 # Serve /static/* (HTML/JS/JSON)
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
@@ -300,6 +304,89 @@ def ui_admin(request: Request):
     return _serve_html("admin.html")
 
 # --------------------------
+from pydantic import BaseModel, Field, AnyUrl
+from typing import List, Optional
+import uuid
+from urllib.parse import urlparse
+
+# ---------- Bulk upsert companies (+ optional seeds) ----------
+class SeedIn(BaseModel):
+    url: AnyUrl
+    scope: str = "host"
+    source: Optional[str] = None  # 'official','dps','yelp','bbb','scrapmonster','mapquest', etc.
+
+class CompanyIn(BaseModel):
+    name: str = Field(min_length=1)
+    city: Optional[str] = None
+    state: Optional[str] = "AZ"
+    notes: Optional[str] = None
+    seeds: List[SeedIn] = []      # zero or more seed URLs
+
+@app.post("/admin/companies/bulk_upsert", tags=["Admin","Scraper"], summary="Bulk upsert companies and attach seed URLs")
+def bulk_upsert_companies(items: List[CompanyIn], request: Request):
+    require_admin(request)
+    added, updated, seeds_added = 0, 0, 0
+    with db() as conn:
+        for it in items:
+            # find by exact name + (optional) city/state; adjust matching as you like
+            row = conn.execute(
+                "SELECT id FROM companies WHERE name=%s AND COALESCE(city,'')=COALESCE(%s,'') AND COALESCE(state,'')=COALESCE(%s,'')",
+                (it.name, it.city, it.state)
+            ).fetchone()
+            if row:
+                cid = row["id"]
+                conn.execute("UPDATE companies SET notes=COALESCE(%s, notes), updated_at=NOW() WHERE id=%s", (it.notes, cid))
+                updated += 1
+            else:
+                cid = str(uuid.uuid4())
+                conn.execute("INSERT INTO companies (id,name,city,state,notes) VALUES (%s,%s,%s,%s,%s)", (cid, it.name, it.city, it.state, it.notes))
+                added += 1
+
+            # attach seeds (and push into frontier queue)
+            for s in it.seeds:
+                try:
+                    sid = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO company_seeds (id, company_id, url, scope, source) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (sid, cid, str(s.url), s.scope, s.source)
+                    )
+                    # also mirror into scrape_frontier so scheduler will pick it up
+                    pu = urlparse(str(s.url))
+                    conn.execute(
+                        "INSERT INTO scrape_frontier (id, seed_id, url, host, scope, priority) "
+                        "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (str(uuid.uuid4()), sid, str(s.url), pu.netloc.lower(), s.scope, 50)
+                    )
+                    seeds_added += 1
+                except Exception:
+                    pass
+    return {"ok": True, "companies_added": added, "companies_updated": updated, "seeds_enqueued": seeds_added}
+
+# ---------- Queue verification for one company (kick off your existing flow) ----------
+@app.post("/admin/companies/{company_id}/queue_verification", tags=["Admin","Scraper"], summary="Queue verification crawl for a company")
+def queue_company_verification(company_id: str, request: Request, max_pages: int = Query(25, ge=1, le=200), scope: str = Query("host")):
+    require_admin(request)
+    with db() as conn:
+        # gather seeds for the company
+        seeds = conn.execute("SELECT id, url, scope FROM company_seeds WHERE company_id=%s", (company_id,)).fetchall()
+        if not seeds:
+            raise HTTPException(400, "No seeds for this company")
+    # Create an ad-hoc scrape task per seed (your /scraper/tasks runner handles background)
+    created = []
+    for s in seeds:
+        tid = str(uuid.uuid4())
+        # record task
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO scrape_tasks (id, seed_url, max_pages, scope, notes, status) VALUES (%s,%s,%s,%s,%s,'queued')",
+                (tid, s["url"], max_pages, scope or s["scope"], f"company:{company_id}")
+            )
+        # run background locally (reuse router’s runner)
+        from scraper_router import run_task  # safe import (module-level function)
+        # You can also push this to a worker queue; here we just return identifiers:
+        created.append({"task_id": tid, "seed_url": s["url"]})
+    return {"ok": True, "created_tasks": created}
+# --------------------------
 # Profiles
 # --------------------------
 @app.post("/profiles", tags=["Profiles"], summary="Create profile")
@@ -329,6 +416,89 @@ def list_profiles(
         rows = conn.execute(sql, tuple(vals)).fetchall()
     return rows
 
+# --------------------------
+
+class VerifyWebsiteOut(BaseModel):
+    profile_id: str
+    target_url: str
+    found_canonical: Optional[str] = None
+    title_match: Optional[bool] = None
+    status: str
+    notes: Optional[str] = None
+
+@app.post("/admin/profiles/{profile_id}/verify_website", tags=["Verification"], summary="Scrape & verify a profile's website (admin)")
+def verify_profile_website(profile_id: str, request: Request, max_pages: int = Query(10, ge=1, le=100), scope: str = Query("host")):
+    require_manager_or_admin(request)
+    # 1) lookup profile
+    with db() as conn:
+        prof = conn.execute("SELECT id, display_name, external_ref FROM profiles WHERE id=%s", (profile_id,)).fetchone()
+        if not prof:
+            raise HTTPException(404, "profile not found")
+    if not prof["external_ref"]:
+        raise HTTPException(400, "profile has no external_ref (website) set")
+
+    # 2) create a scrape task and run inline (small scope) to produce an immediate signal
+    #    (for larger scale use /scraper/tasks to run in background)
+    from scraper_core import PoliteSyncCrawler
+    crawler = PoliteSyncCrawler()
+
+    seed = prof["external_ref"]
+    seen, queue = set(), [seed]
+    found = None
+    title_match = None
+    parsed_name = (prof["display_name"] or "").lower()
+
+    try:
+        while queue and len(seen) < max_pages:
+            url = queue.pop(0)
+            if url in seen: 
+                continue
+            seen.add(url)
+            rec, err = crawler.fetch(url)
+            if rec:
+                # store result for provenance (ad hoc, separate from /scraper/tasks)
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'web_verify',%s)",
+                        (prof["id"], json.dumps({
+                            "url": rec["url"], "status_code": rec["status_code"],
+                            "title": rec["title"], "canonical_url": rec["canonical_url"],
+                            "meta_sample": list(rec["meta"].keys())[:8],
+                            "ts": rec["fetched_at"].isoformat()
+                        }, default=str))
+                    )
+
+                # signal extraction
+                if rec.get("canonical_url"):
+                    found = rec["canonical_url"]
+                if rec.get("title"):
+                    t = (rec["title"] or "").lower()
+                    # simple heuristic: display_name must appear in <title>
+                    title_match = (parsed_name in t) if parsed_name else None
+
+                # limited discovery
+                for link in (rec.get("links_sample") or []):
+                    from scraper_router import _within_scope
+                    if _within_scope(seed, link, scope):
+                        queue.append(link)
+
+        status = "verified" if (found or title_match) else "inconclusive"
+        notes = None if status == "verified" else "No clear canonical/title signal found within scope."
+        out = VerifyWebsiteOut(profile_id=prof["id"], target_url=seed, found_canonical=found,
+                               title_match=title_match, status=status, notes=notes)
+        # persist verification summary
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO verifications (profile_id, kind, status, meta) VALUES (%s,%s,%s,%s)",
+                (prof["id"], "website", status, json.dumps(out.model_dump()))
+            )
+            conn.execute(
+                "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'verification',%s)",
+                (prof["id"], json.dumps({"kind":"website","status":status,"details":out.model_dump()}))
+            )
+        return out
+    except Exception as e:
+        raise HTTPException(500, f"verification failed: {e}")
 # --------------------------
 # Reviews (with moderation pipeline)
 # --------------------------
