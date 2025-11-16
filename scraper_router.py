@@ -17,6 +17,16 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 import random
 
+# Initialize FastAPI router and admin dependency early (before first usage)
+router = APIRouter(prefix="/scraper", tags=["Scraper"])
+
+# ---- Admin dependency (imported from main file in-wire, see patch step) ----
+def require_admin_dep(req: Request):
+    role = req.session.get("role")
+    if role != "admin":
+        raise HTTPException(403, "Admin only")
+    return True
+
 GLOBAL_DAILY = int(os.getenv("SCRAPER_GLOBAL_MAX_DAILY_PAGES", "10000"))
 PER_HOST_DAILY = int(os.getenv("SCRAPER_PER_HOST_DAILY_PAGES", "50"))
 JOB_SHARD = os.getenv("SCRAPER_JOB_SHARD", "0/1")  # "k/n"
@@ -90,10 +100,10 @@ def run_scheduler(batch: int = 500):
             # remove from frontier
             conn.execute("DELETE FROM scrape_frontier WHERE id=%s", (r["id"],))
             if rec:
-                _insert_result(r["seed_id"], rec)  # reuse existing helper with task_id=seed_id
-
-                # host/day budget check
-                dayhost = conn.execute("""
+                # enqueue same-scope discoveries
+                # _within_scope is defined in this module; no import needed
+                for link in (rec.get("links_sample") or []):
+                    dayhost = conn.execute("""
                     SELECT COUNT(*) AS c FROM scrape_results 
                      WHERE host=%s AND fetched_at::date = CURRENT_DATE
                 """, (r["host"],)).fetchone()["c"]

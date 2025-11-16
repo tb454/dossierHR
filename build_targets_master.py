@@ -343,8 +343,7 @@ def main():
             continue
         lookup_candidates.add(org)
 
-    for org in sorted(lookup_candidates):
-        guessed = fetch_homepage_from_bing(org)
+    for org in sorted(lookup_candidates):        
         homepage_map= dict (CANONICAL_HOMEPAGES)
 
     # Final write
