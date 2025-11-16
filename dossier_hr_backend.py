@@ -36,7 +36,7 @@ DB_URL = os.getenv("DATABASE_URL")
 BRIDGE_SYNC_HMAC_SECRET = os.getenv("BRIDGE_SYNC_HMAC_SECRET", "dev_hmac")  # kept for backward compat if you ever need it
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET", "dev_ingest")
 PROM_ENABLED = os.getenv("PROM_ENABLED", "true").lower() == "true"
-
+ATLAS_INGEST_SECRET = os.getenv("ATLAS_INGEST_SECRET", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@dossierhr.local")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")  # bcrypt hash
 
@@ -57,6 +57,32 @@ def _verify_hmac_by_product(body: bytes, header_sig: Optional[str], product: str
     if not hmac.compare_digest(mac, header_sig or ""):
         raise HTTPException(401, "Invalid signature")
 
+def _verify_atlas_hmac(raw: bytes, ts: Optional[str], sig: Optional[str]) -> None:
+    """
+    Verify HMAC for BRidge/Atlas ingest.
+
+    BRidge computes:
+      ts = str(int(time.time()))
+      mac = HMAC(ATLAS_INGEST_SECRET, ts + "." + raw_body).hexdigest()
+      headers:
+        X-Atlas-Timestamp: ts
+        X-Atlas-Signature: mac
+    """
+    if not ATLAS_INGEST_SECRET:
+        # In dev/CI, skip verification if no secret configured
+        return
+
+    if not (ts and sig):
+        raise HTTPException(401, "Missing Atlas signature")
+
+    expected = hmac.new(
+        ATLAS_INGEST_SECRET.encode("utf-8"),
+        ts.encode("utf-8") + b"." + (raw or b""),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, sig):
+        raise HTTPException(401, "Invalid Atlas signature")
 # --------------------------
 # App
 # --------------------------
@@ -734,6 +760,82 @@ async def sync_product(
             processed += 1
 
     return {"ok": True, "product": product, "processed": processed}
+
+class AtlasEvent(BaseModel):
+    source_system: str   # e.g. "bridge"
+    source_table: str    # e.g. "contracts", "bols"
+    source_id: str       # UUID or PK from the source system
+    event_type: str      # e.g. "CONTRACT_CREATED", "BOL_DELIVERED"
+    payload: dict = {}   # free-form JSON from BRidge
+
+@app.post("/atlas/ingest", tags=["Sync"], summary="Ingest single event from BRidge/Atlas queue")
+async def atlas_ingest(
+    request: Request,
+    x_atlas_timestamp: Optional[str] = Header(None, alias="X-Atlas-Timestamp"),
+    x_atlas_signature: Optional[str] = Header(None, alias="X-Atlas-Signature"),
+):
+    # 1) Get raw body and verify HMAC exactly like BRidge
+    raw = await request.body()
+    _verify_atlas_hmac(raw, x_atlas_timestamp, x_atlas_signature)
+
+    # 2) Parse payload into a typed event
+    try:
+        data = json.loads(raw.decode() or "{}")
+        ev = AtlasEvent(**data)
+    except Exception:
+        raise HTTPException(400, "Invalid Atlas payload")
+
+    # 3) Store a durable log row + mirror into hr_records
+    with db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS atlas_ingest_log (
+              id UUID PRIMARY KEY,
+              source_system TEXT NOT NULL,
+              source_table  TEXT NOT NULL,
+              source_id     TEXT NOT NULL,
+              event_type    TEXT NOT NULL,
+              payload       JSONB,
+              created_at    TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+
+        conn.execute(
+            """
+            INSERT INTO atlas_ingest_log (
+              id, source_system, source_table, source_id, event_type, payload
+            ) VALUES (%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                str(uuid.uuid4()),
+                ev.source_system,
+                ev.source_table,
+                ev.source_id,
+                ev.event_type,
+                json.dumps(ev.payload),
+            ),
+        )
+
+        # For now, attach to a "global" profile (or None) and keep full context in payload.
+        # Later you can resolve buyer/seller → profile_id if you want.
+        conn.execute(
+            """
+            INSERT INTO hr_records (profile_id, event_type, payload)
+            VALUES (%s,%s,%s)
+            """,
+            (
+                None,
+                f"{ev.source_system}:{ev.event_type}",
+                json.dumps(
+                    {
+                        "source_table": ev.source_table,
+                        "source_id": ev.source_id,
+                        **(ev.payload or {}),
+                    }
+                ),
+            ),
+        )
+
+    return {"ok": True}
 
 # --------------------------
 # Legal pages (stubs)
