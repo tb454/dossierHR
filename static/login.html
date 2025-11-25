@@ -15,28 +15,9 @@
     <p id="err" class="hidden text-sm text-red-600 text-center">Invalid credentials.</p>
   </form>
 
-  <script>
-    document.getElementById("loginForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const email = document.getElementById("email").value.trim();
-      const password = document.getElementById("password").value;
+<!-- Auth + page script -->
+<script defer src="/static/auth.js"></script>
+<script defer src="/static/js/login.js"></script>
 
-      const res = await fetch("/login", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password })
-      });
-      const data = await res.json();
-
-      if (data.ok) {
-        if (data.role === "admin") location.href = "/static/admin.html";
-        else if (data.role === "manager") location.href = "/static/manager.html";
-        else location.href = "/static/employee.html";
-      } else {
-        document.getElementById("err").classList.remove("hidden");
-      }
-    });
-  </script>
 </body>
 </html>

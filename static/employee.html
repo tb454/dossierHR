@@ -5,6 +5,8 @@
   <title>Employee | Dossier HR</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- session + helpers -->
   <script defer src="/static/auth.js"></script>
   <script defer src="/static/viewer.js"></script>
 </head>
@@ -21,21 +23,6 @@
     <div id="profile-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
   </main>
 
-  <script>
-    (async function init() {
-      const me = await requireRole(["employee","manager","admin"]); // allow elevated roles too
-      document.getElementById("whoami").textContent = `${me.email} (${me.role})`;
-
-      const profiles = await loadProfiles();
-      const mine = profiles.find(p => (p.email || "").toLowerCase() === (me.email || "").toLowerCase());
-      const list = mine ? [mine] : [];
-      renderProfiles(list, document.getElementById("profile-container"));
-
-      document.getElementById("logoutBtn").onclick = async () => {
-        await fetch("/logout", { method: "POST", credentials: "include" });
-        location.href = "/static/login.html";
-      };
-    })();
-  </script>
+  <script defer src="/static/js/employee.js"></script>
 </body>
 </html>
