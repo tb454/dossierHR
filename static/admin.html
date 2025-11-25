@@ -20,22 +20,23 @@
   </header>
 
   <main class="p-4">
-    <div id="profile-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-semibold mb-2">Recent Profiles (proof)</h2>
+        <div id="profiles-box" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+      </div>
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-semibold mb-2">Reviews by Day (last 14)</h2>
+        <div id="reviews-by-day" class="space-y-1 text-sm"></div>
+        <div class="mt-4">
+          <button id="run-dump" class="px-3 py-1 bg-blue-600 text-white rounded">Run Nightly Dump</button>
+          <div id="dump-out" class="mt-2 text-xs text-gray-600"></div>
+        </div>
+      </div>
+    </div>
   </main>
 
-  <script>
-    (async function init() {
-      const me = await requireRole(["admin"]);
-      document.getElementById("whoami").textContent = `${me.email} (${me.role})`;
+  <script defer src="/static/js/admin.js"></script>
 
-      const profiles = await loadProfiles();
-      renderProfiles(profiles, document.getElementById("profile-container"));
-
-      document.getElementById("logoutBtn").onclick = async () => {
-        await fetch("/logout", { method: "POST", credentials: "include" });
-        location.href = "/static/login.html";
-      };
-    })();
-  </script>
 </body>
 </html>

@@ -9,14 +9,14 @@
 <body class="min-h-screen bg-gray-100 flex items-center justify-center">
   <form id="loginForm" class="bg-white w-full max-w-md p-6 rounded-2xl shadow space-y-4">
     <h1 class="text-2xl font-bold text-center">Dossier HR</h1>
-    <input type="email" id="email" placeholder="Email" class="w-full border p-3 rounded" required />
-    <input type="password" id="password" placeholder="Password" class="w-full border p-3 rounded" required />
+    <input type="email" name="email" id="email" placeholder="Email" class="w-full border p-3 rounded" required />
+    <input type="password" name="password" id="password" placeholder="Password" class="w-full border p-3 rounded" required />
     <button class="w-full bg-blue-600 text-white p-3 rounded hover:bg-blue-700">Login</button>
-    <p id="err" class="hidden text-sm text-red-600 text-center">Invalid credentials.</p>
-  </form>
+    <p class="login-error hidden text-sm text-red-600 text-center">Invalid credentials.</p>
+    </form>
 
 <!-- Auth + page script -->
-<script defer src="/static/auth.js"></script>
+<script defer src="/static/js/auth.js"></script>
 <script defer src="/static/js/login.js"></script>
 
 </body>
