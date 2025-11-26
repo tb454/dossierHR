@@ -1,5 +1,27 @@
 // Admin: gate, show quick proof panels (profiles + reviews/day + dump button)
 (async function () {
+    function renderIngest(rows, el) {
+    if (!el) return;
+    el.innerHTML = '';
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="text-gray-500">No BRidge events yet.</div>';
+      return;
+    }
+    for (const r of rows) {
+      const d = new Date(r.created_at);
+      const item = document.createElement('div');
+      item.className = 'border rounded-lg p-3 bg-white/50';
+      item.innerHTML = `
+        <div class="flex items-center justify-between">
+          <div class="font-mono text-xs text-gray-500">${d.toLocaleString()}</div>
+          <span class="text-xs px-2 py-0.5 rounded bg-gray-100">${r.src || 'bridge'}</span>
+        </div>
+        <div class="mt-1 font-semibold break-all">${r.event_type || '(event)'}</div>
+        <pre class="mt-1 overflow-x-auto text-xs bg-gray-50 p-2 rounded">${JSON.stringify(r.payload || {}, null, 2)}</pre>
+      `;
+      el.appendChild(item);
+    }
+  }
   const who = await requireRole(['admin']);
   if (!who) return;
 
@@ -56,5 +78,22 @@
         dumpBtn.disabled = false;
       }
     });
+  }
+
+  // Live BRidge events
+  const ingestBox = document.querySelector('#ingest-list');
+  const refreshBtn = document.querySelector('#refresh-ingest');
+  async function loadIngest() {
+    try {
+      const r = await fetch('/ingest/recent_bridge?limit=25', { credentials: 'include' });
+      const j = await r.json();
+      renderIngest(j, ingestBox);
+    } catch (e) {
+      if (ingestBox) ingestBox.textContent = 'Failed to load BRidge events.';
+    }
+  }
+  if (ingestBox) {
+    await loadIngest();
+    if (refreshBtn) refreshBtn.addEventListener('click', loadIngest);
   }
 })();
