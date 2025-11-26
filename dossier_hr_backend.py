@@ -838,6 +838,45 @@ async def atlas_ingest(
     return {"ok": True}
 
 # --------------------------
+# BRidge ingest preview (read)
+# --------------------------
+@app.get("/ingest/recent_bridge", tags=["Sync"], summary="Recent BRidge events (atlas + hr mirror)")
+def recent_bridge(limit: int = Query(25, ge=1, le=200)):
+    with db() as conn:
+        # atlas_ingest_log (authoritative when using /atlas/ingest)
+        atlas = conn.execute("""
+            SELECT created_at,
+                   source_system || ':' || event_type AS event_type,
+                   payload
+            FROM atlas_ingest_log
+            WHERE lower(source_system) = 'bridge'
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,)).fetchall()
+
+        # hr_records (used by /sync/bridge)
+        hr = conn.execute("""
+            SELECT created_at,
+                   event_type,
+                   payload
+            FROM hr_records
+            WHERE lower(event_type) LIKE 'bridge%%'
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,)).fetchall()
+
+    # merge, sort by created_at desc, then cap to limit
+    rows = [
+        {"created_at": r["created_at"], "event_type": r["event_type"], "payload": r["payload"], "src": "atlas"}
+        for r in atlas
+    ] + [
+        {"created_at": r["created_at"], "event_type": r["event_type"], "payload": r["payload"], "src": "hr"}
+        for r in hr
+    ]
+    rows.sort(key=lambda x: x["created_at"], reverse=True)
+    return rows[:limit]
+
+# --------------------------
 # Legal pages (stubs)
 # --------------------------
 @app.get("/terms", tags=["Legal"], summary="Terms page")
