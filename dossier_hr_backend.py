@@ -94,112 +94,140 @@ app.include_router(scraper_router)
 # ----- BRidge Sales  -----
 def ensure_sales_tables(conn):
     conn.execute("""
+    -- reps
     CREATE TABLE IF NOT EXISTS sales_reps (
       id UUID PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'candidate', -- candidate/active/suspended/terminated
       legal_name TEXT,
       email TEXT UNIQUE NOT NULL,
       phone TEXT,
+      role TEXT NOT NULL DEFAULT 'sales_rep', -- admin/sales_manager/sales_rep/sdr
+      territory TEXT NULL,
+      vertical TEXT NULL, -- yard/mill/manufacturer/broker/other
       referral_code TEXT UNIQUE NOT NULL,
       agreement_signed_at TIMESTAMP NULL,
       w9_received_at TIMESTAMP NULL,
-      payout_method TEXT NULL,
+      payout_method TEXT NULL, -- manual/ach/stripe_connect
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS sales_accounts (
+    -- invites (optional; you wanted the page)
+    CREATE TABLE IF NOT EXISTS sales_invites (
       id UUID PRIMARY KEY,
-      bridge_account_id TEXT UNIQUE NOT NULL,
-      company_name TEXT NULL,
-      plan_tier TEXT NULL, -- starter/standard/enterprise
-      status TEXT NOT NULL DEFAULT 'unknown', -- active/past_due/canceled/etc
-      first_paid_at TIMESTAMP NULL, -- first subscription payment date
+      email TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'sales_rep',
+      invited_by_email TEXT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      accepted_at TIMESTAMP NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      UNIQUE(email, token_hash)
     );
 
-    CREATE TABLE IF NOT EXISTS account_ownership (
+    -- plan acceptance (versioned)
+    CREATE TABLE IF NOT EXISTS commission_plans (
       id UUID PRIMARY KEY,
-      bridge_account_id TEXT NOT NULL,
-      sales_owner_rep_id UUID NULL,
+      version TEXT NOT NULL UNIQUE,   -- "v1.0"
+      rules JSONB NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS sales_rep_plan_acceptance (
+      id UUID PRIMARY KEY,
+      rep_id UUID NOT NULL,
+      plan_version TEXT NOT NULL,
+      accepted_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      ip TEXT NULL,
+      user_agent TEXT NULL
+    );
+
+    -- companies/accounts
+    CREATE TABLE IF NOT EXISTS sales_companies (
+      id UUID PRIMARY KEY,
+      name TEXT NOT NULL,
+      domain TEXT NULL,
+      website TEXT NULL,
+      city TEXT NULL,
+      state TEXT NULL,
+      country TEXT NULL DEFAULT 'US',
+      company_type TEXT NOT NULL DEFAULT 'yard', -- yard/mill/manufacturer/broker/other
+      notes TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE (name, COALESCE(domain,''))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sales_companies_domain ON sales_companies(domain);
+    CREATE INDEX IF NOT EXISTS idx_sales_companies_type ON sales_companies(company_type);
+
+    -- contacts
+    CREATE TABLE IF NOT EXISTS sales_contacts (
+      id UUID PRIMARY KEY,
+      company_id UUID NOT NULL,
+      name TEXT NOT NULL,
+      title TEXT NULL,
+      email TEXT NULL,
+      phone TEXT NULL,
+      is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sales_contacts_company ON sales_contacts(company_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_contacts_email ON sales_contacts(email);
+
+    -- company ownership + house flag + audit
+    CREATE TABLE IF NOT EXISTS sales_company_ownership (
+      id UUID PRIMARY KEY,
+      company_id UUID NOT NULL,
+      owner_rep_id UUID NULL,
+      assisting_rep_id UUID NULL,
       house_account BOOLEAN NOT NULL DEFAULT FALSE,
-      protection_expires_at TIMESTAMP NULL, -- 14-day lead protection window
+      protection_expires_at TIMESTAMP NULL,
       ownership_start TIMESTAMP NOT NULL DEFAULT NOW(),
       ownership_end TIMESTAMP NULL,
       ownership_reason TEXT NOT NULL DEFAULT 'unknown',
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS idx_account_ownership_bridge ON account_ownership(bridge_account_id);
-    CREATE INDEX IF NOT EXISTS idx_account_ownership_owner ON account_ownership(sales_owner_rep_id);
+    CREATE INDEX IF NOT EXISTS idx_company_owner_company ON sales_company_ownership(company_id);
+    CREATE INDEX IF NOT EXISTS idx_company_owner_owner ON sales_company_ownership(owner_rep_id);
 
-    CREATE TABLE IF NOT EXISTS commission_events (
+    CREATE TABLE IF NOT EXISTS sales_ownership_audit (
       id UUID PRIMARY KEY,
-      bridge_account_id TEXT NOT NULL,
-      event_type TEXT NOT NULL, -- subscription_payment, overage_payment, refund, chargeback, milestone
-      external_ref TEXT NULL,   -- invoice_id/payment_intent/etc for idempotency
-      amount_cents BIGINT NOT NULL DEFAULT 0,
-      currency TEXT NOT NULL DEFAULT 'USD',
-      occurred_at TIMESTAMP NOT NULL,
-      payload JSONB,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE (event_type, external_ref)
-    );
-
-    CREATE TABLE IF NOT EXISTS commission_ledger (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      bridge_account_id TEXT NOT NULL,
-      commission_event_id UUID NULL,
-      line_type TEXT NOT NULL, -- activation_bonus, residual_mrr, overage_residual, clawback, manual_adjustment
-      amount_cents BIGINT NOT NULL,
-      vesting_status TEXT NOT NULL DEFAULT 'earned', -- earned/pending/forfeited/paid
-      scheduled_earn_date TIMESTAMP NOT NULL DEFAULT NOW(),
+      entity_type TEXT NOT NULL, -- company/deal/lead
+      entity_id TEXT NOT NULL,
+      action TEXT NOT NULL, -- assign/unassign/house/transfer
+      from_rep_id UUID NULL,
+      to_rep_id UUID NULL,
+      reason TEXT NULL,
+      actor_email TEXT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS idx_ledger_rep ON commission_ledger(rep_id);
-    CREATE INDEX IF NOT EXISTS idx_ledger_sched ON commission_ledger(scheduled_earn_date);
-
-    CREATE TABLE IF NOT EXISTS rep_payouts (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      period_start DATE NOT NULL,
-      period_end DATE NOT NULL,
-      net30_release_date DATE NOT NULL,
-      total_cents BIGINT NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending', -- pending/approved/paid/failed
-      payout_ref TEXT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      paid_at TIMESTAMP NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS rep_payout_lines (
-      id UUID PRIMARY KEY,
-      payout_id UUID NOT NULL,
-      ledger_id UUID NOT NULL,
-      amount_cents BIGINT NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS sales_sync_state (
-      id TEXT PRIMARY KEY, -- e.g. 'bridge_commission_sync'
-      last_created_at TIMESTAMP NOT NULL DEFAULT '1970-01-01'
-    );
-
+    -- leads
     CREATE TABLE IF NOT EXISTS sales_leads (
       id UUID PRIMARY KEY,
       rep_id UUID NOT NULL,
+      company_id UUID NULL,
       company_name TEXT NOT NULL,
-      contact_name TEXT NULL,
-      contact_email TEXT NULL,
-      contact_phone TEXT NULL,
+      domain TEXT NULL,
       website TEXT NULL,
       city TEXT NULL,
       state TEXT NULL,
-      stage TEXT NOT NULL DEFAULT 'new', -- new/contacted/demo/sent_invoice/closed_won/closed_lost
+      company_type TEXT NULL,   -- yard/mill/manufacturer/broker/other
+      lead_source TEXT NULL,    -- cold_outbound/inbound/referral/conference/etc
+      contact_name TEXT NULL,
+      contact_title TEXT NULL,
+      contact_email TEXT NULL,
+      contact_phone TEXT NULL,
+      stage TEXT NOT NULL DEFAULT 'new', -- new/contacted/qualified/demo_scheduled/demo_done/proposal/negotiation/closed_won/closed_lost
       notes TEXT NULL,
+      duplicate_of UUID NULL,
+      linked_company_id UUID NULL,
+      linked_deal_id UUID NULL,
+      last_activity_at TIMESTAMP NULL,
+      next_follow_up_at TIMESTAMP NULL,
       protection_expires_at TIMESTAMP NOT NULL DEFAULT (NOW() + INTERVAL '14 days'),
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -207,322 +235,1303 @@ def ensure_sales_tables(conn):
 
     CREATE INDEX IF NOT EXISTS idx_sales_leads_rep ON sales_leads(rep_id);
     CREATE INDEX IF NOT EXISTS idx_sales_leads_stage ON sales_leads(stage);
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_created ON sales_leads(created_at);
+    CREATE INDEX IF NOT EXISTS idx_sales_leads_domain ON sales_leads(domain);
+    CREATE INDEX IF NOT EXISTS idx_sales_leads_company_id ON sales_leads(company_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_leads_followup ON sales_leads(next_follow_up_at);
 
-    CREATE TABLE IF NOT EXISTS sales_lead_activities (
+    -- activities (calls/emails/notes) with optional follow-up
+    CREATE TABLE IF NOT EXISTS sales_activities (
       id UUID PRIMARY KEY,
-      lead_id UUID NOT NULL,
       rep_id UUID NOT NULL,
+      lead_id UUID NULL,
+      company_id UUID NULL,
+      deal_id UUID NULL,
       activity_type TEXT NOT NULL, -- call/email/demo/note/text/other
       notes TEXT NULL,
+      follow_up_at TIMESTAMP NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS idx_sales_lead_acts_lead ON sales_lead_activities(lead_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_lead_acts_rep ON sales_lead_activities(rep_id);             
-    
-    INSERT INTO sales_sync_state (id, last_created_at)
-    VALUES ('bridge_commission_sync', '1970-01-01')
-    ON CONFLICT (id) DO NOTHING;
+    CREATE INDEX IF NOT EXISTS idx_sales_activities_rep ON sales_activities(rep_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_activities_lead ON sales_activities(lead_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_activities_deal ON sales_activities(deal_id);
+
+    -- tasks / reminders
+    CREATE TABLE IF NOT EXISTS sales_tasks (
+      id UUID PRIMARY KEY,
+      rep_id UUID NOT NULL,
+      lead_id UUID NULL,
+      company_id UUID NULL,
+      deal_id UUID NULL,
+      title TEXT NOT NULL,
+      due_at TIMESTAMP NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open', -- open/done/snoozed
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMP NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sales_tasks_rep_due ON sales_tasks(rep_id, due_at);
+    CREATE INDEX IF NOT EXISTS idx_sales_tasks_status ON sales_tasks(status);
+
+    -- deals (pipeline)
+    CREATE TABLE IF NOT EXISTS sales_deals (
+      id UUID PRIMARY KEY,
+      company_id UUID NOT NULL,
+      owner_rep_id UUID NOT NULL,
+      assisting_rep_id UUID NULL,
+      proposed_plan TEXT NULL, -- starter/standard/enterprise
+      expected_go_live DATE NULL,
+      expected_mrr_cents BIGINT NULL,
+      expected_tons_per_month BIGINT NULL,
+      expected_bols_per_month BIGINT NULL,
+      probability INT NOT NULL DEFAULT 20,
+      stage TEXT NOT NULL DEFAULT 'new', -- new/contacted/qualified/demo_scheduled/demo_done/proposal/negotiation/closed_won/closed_lost
+      stage_entered_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      closed_at TIMESTAMP NULL,
+      notes TEXT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sales_deals_owner ON sales_deals(owner_rep_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_deals_stage ON sales_deals(stage);
+    CREATE INDEX IF NOT EXISTS idx_sales_deals_company ON sales_deals(company_id);
+
+    -- onboarding checklist per company
+    CREATE TABLE IF NOT EXISTS onboarding_checklists (
+      id UUID PRIMARY KEY,
+      company_id UUID NOT NULL,
+      deal_id UUID NULL,
+      status TEXT NOT NULL DEFAULT 'yellow', -- green/yellow/red
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      notes TEXT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS onboarding_steps (
+      id UUID PRIMARY KEY,
+      checklist_id UUID NOT NULL,
+      step_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      is_required BOOLEAN NOT NULL DEFAULT TRUE,
+      status TEXT NOT NULL DEFAULT 'todo', -- todo/doing/done/blocked
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      blocker_notes TEXT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_onboarding_company ON onboarding_checklists(company_id);
+    CREATE INDEX IF NOT EXISTS idx_onboarding_steps_checklist ON onboarding_steps(checklist_id);
+
+    -- attachments (NDA/proposal/screenshots) - store URL/path reference only
+    CREATE TABLE IF NOT EXISTS sales_attachments (
+      id UUID PRIMARY KEY,
+      rep_id UUID NOT NULL,
+      lead_id UUID NULL,
+      company_id UUID NULL,
+      deal_id UUID NULL,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    -- assets / templates
+    CREATE TABLE IF NOT EXISTS sales_assets (
+      id UUID PRIMARY KEY,
+      name TEXT NOT NULL,
+      asset_type TEXT NOT NULL, -- pitch_deck/one_pager/fee_schedule/template/script/objections
+      url TEXT NULL,
+      notes TEXT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    -- revenue events (manual now)
+    CREATE TABLE IF NOT EXISTS revenue_events (
+      id UUID PRIMARY KEY,
+      company_id UUID NOT NULL,
+      revenue_type TEXT NOT NULL, -- subscription/overage/addon/one_time
+      amount_cents BIGINT NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'USD',
+      collected_at TIMESTAMP NOT NULL,
+      external_ref TEXT NULL,
+      created_by_email TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_revenue_company_collected ON revenue_events(company_id, collected_at);
+
+    -- commission ledger (engine shaped)
+    CREATE TABLE IF NOT EXISTS commission_ledger (
+      id UUID PRIMARY KEY,
+      rep_id UUID NOT NULL,
+      company_id UUID NOT NULL,
+      revenue_event_id UUID NULL,
+      deal_id UUID NULL,
+      line_type TEXT NOT NULL, -- activation_bonus/residual_mrr/overage_residual/adjustment
+      amount_cents BIGINT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- pending/earned/payable/paid/disputed
+      net30_release_at TIMESTAMP NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      notes TEXT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_comm_ledger_rep ON commission_ledger(rep_id);
+    CREATE INDEX IF NOT EXISTS idx_comm_ledger_status ON commission_ledger(status);
+
+    CREATE TABLE IF NOT EXISTS commission_disputes (
+      id UUID PRIMARY KEY,
+      rep_id UUID NOT NULL,
+      ledger_id UUID NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open', -- open/resolved/rejected
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMP NULL,
+      resolution_notes TEXT NULL
+    );
+
     """)
 
-PLAN_ACTIVATION = {
-    "starter": 250_00,
-    "standard": 750_00,
-    "enterprise": 2500_00,
+# --------------------------
+# Sales constants (your plan v1.0)
+# --------------------------
+COMMISSION_PLAN_VERSION = "v1.0"
+
+PLAN_RULES_V1 = {
+    "activation_bonus": {"starter": 25000, "standard": 75000, "enterprise": 250000},
+    "activation_vesting": [
+        {"pct": 0.50, "months": 1},
+        {"pct": 0.25, "months": 3},
+        {"pct": 0.25, "months": 6},
+    ],
+    "mrr": {"y1_pct": 0.15, "y2_pct": 0.05, "months_y1": 12, "months_y2": 24},
+    "overage_pct": 0.02,
+    "net30_days": 30,
 }
 
-MRR_RATE_Y1 = 0.15
-MRR_RATE_Y2 = 0.05
-OVERAGE_RATE = 0.02
+DEAL_STAGES = ["new","contacted","qualified","demo_scheduled","demo_done","proposal","negotiation","closed_won","closed_lost"]
+COMPANY_TYPES = ["yard","mill","manufacturer","broker","other"]
+REVENUE_TYPES = ["subscription","overage","addon","one_time"]
 
-ACTIVATION_VESTING = [
-    (0.50, 1),  # 50% after month 1 payment clears
-    (0.25, 3),  # 25% after month 3
-    (0.25, 6),  # 25% after month 6
-]
-
-class SalesRepCreateIn(BaseModel):
-    legal_name: Optional[str] = None
-    email: str
-    phone: Optional[str] = None
-
-def _new_ref_code():
-    # short, human-friendly
+# --------------------------
+# Helpers
+# --------------------------
+def _new_ref_code() -> str:
     return uuid.uuid4().hex[:6].upper()
 
-@app.post("/admin/sales/reps", tags=["Admin","Sales"], summary="Create sales rep (candidate)")
-def create_sales_rep(payload: SalesRepCreateIn, request: Request):
-    require_admin(request)
+def _bcrypt_hash(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def _extract_domain(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    s = (s or "").strip().lower()
+    if "@" in s and "://" not in s:
+        return s.split("@")[-1].strip().strip(".")
+    try:
+        u = s if "://" in s else "https://" + s
+        host = (urlparse(u).netloc or "").lower().split(":")[0]
+        if host.startswith("www."):
+            host = host[4:]
+        return host or None
+    except Exception:
+        return None
+
+def _ensure_plan_row(conn):
+    row = conn.execute("SELECT 1 FROM commission_plans WHERE version=%s", (COMMISSION_PLAN_VERSION,)).fetchone()
+    if not row:
+        conn.execute(
+            "INSERT INTO commission_plans (id, version, rules) VALUES (%s,%s,%s)",
+            (str(uuid.uuid4()), COMMISSION_PLAN_VERSION, json.dumps(PLAN_RULES_V1))
+        )
+
+def _actor_email(request: Request) -> Optional[str]:
+    return (request.session.get("user") or "").lower().strip() or None
+
+def require_sales_role(request: Request, allowed: List[str]):
+    role = request.session.get("role")
+    if role not in allowed:
+        raise HTTPException(403, "Not authorized")
+    return True
+
+def require_sales_rep(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_rep", "sales_manager", "admin"):
+        raise HTTPException(403, "Sales only")
+    email = (request.session.get("user") or "").lower().strip()
+    if not email:
+        raise HTTPException(401, "Not logged in")
     with db() as conn:
         ensure_sales_tables(conn)
+        rep = conn.execute("SELECT * FROM sales_reps WHERE email=%s", (email,)).fetchone()
+        if not rep:
+            raise HTTPException(403, "No sales rep record")
+        return rep
+
+def require_sales_manager(request: Request):
+    require_sales_role(request, ["sales_manager","admin"])
+    return True
+
+# --------------------------
+# UI routes (serve static pages, CSP-safe)
+# --------------------------
+def _serve_sales_html(filename: str) -> HTMLResponse:
+    p = Path("static") / filename
+    if not p.exists():
+        raise HTTPException(404, "Page not found")
+    return HTMLResponse(p.read_text(encoding="utf-8"))
+
+@app.get("/apply/sales", tags=["UI"], summary="Public sales rep application page")
+def ui_sales_apply():
+    return _serve_sales_html("sales-apply.html")
+
+@app.get("/apply/sales/invite", tags=["UI"], summary="Invite accept page (token)")
+def ui_sales_invite_accept():
+    return _serve_sales_html("sales-invite-accept.html")
+
+@app.get("/dashboard/sales", tags=["UI"], summary="Sales portal")
+def ui_sales_portal(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_rep","sales_manager","admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-portal.html")
+
+@app.get("/sales/leads/ui", tags=["UI"], summary="Leads UI")
+def ui_sales_leads(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_rep","sales_manager","admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-leads.html")
+
+@app.get("/sales/deals/ui", tags=["UI"], summary="Deals UI")
+def ui_sales_deals(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_rep","sales_manager","admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-deals.html")
+
+@app.get("/sales/onboarding/ui", tags=["UI"], summary="Onboarding UI")
+def ui_sales_onboarding(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_rep","sales_manager","admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-onboarding.html")
+
+@app.get("/sales/assets/ui", tags=["UI"], summary="Assets UI")
+def ui_sales_assets(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_rep","sales_manager","admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-assets.html")
+
+@app.get("/sales/admin/ui", tags=["UI"], summary="Sales admin UI")
+def ui_sales_admin(request: Request):
+    role = request.session.get("role")
+    if role not in ("admin","sales_manager"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-admin.html")
+
+@app.get("/sales/manager/ui", tags=["UI"], summary="Sales manager UI")
+def ui_sales_manager_ui(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_manager","admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-manager.html")
+
+# --------------------------
+# Rep onboarding: open apply + admin approve + invite accept
+# --------------------------
+class SalesApplyIn(BaseModel):
+    legal_name: str = Field(min_length=1)
+    email: str = Field(min_length=3)
+    phone: Optional[str] = None
+    territory: Optional[str] = None
+    vertical: Optional[str] = None  # yard/mill/manufacturer/broker/other
+
+@app.post("/sales/apply", tags=["Sales"], summary="Sales rep applies (public)")
+def sales_apply(payload: SalesApplyIn, request: Request):
+    with db() as conn:
+        ensure_sales_tables(conn)
+        _ensure_plan_row(conn)
+
+        email = payload.email.lower().strip()
+        existing = conn.execute("SELECT id, referral_code, status FROM sales_reps WHERE email=%s", (email,)).fetchone()
+        if existing:
+            return {"ok": True, "already_exists": True, "status": existing["status"], "referral_code": existing["referral_code"]}
+
         rep_id = str(uuid.uuid4())
         code = _new_ref_code()
+        role = "sales_rep"
+
         row = conn.execute("""
-            INSERT INTO sales_reps (id, status, legal_name, email, phone, referral_code)
-            VALUES (%s,'candidate',%s,%s,%s,%s)
-            RETURNING id, status, legal_name, email, phone, referral_code, created_at
-        """, (rep_id, payload.legal_name, payload.email.lower().strip(), payload.phone, code)).fetchone()
-    return row
+            INSERT INTO sales_reps (id, status, legal_name, email, phone, role, territory, vertical, referral_code)
+            VALUES (%s,'candidate',%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id, status, legal_name, email, phone, role, territory, vertical, referral_code, created_at
+        """, (rep_id, payload.legal_name, email, payload.phone, role, payload.territory, payload.vertical, code)).fetchone()
+
+        conn.execute(
+            "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
+            (None, "sales_rep_applied", json.dumps({"rep_id": rep_id, "email": email}))
+        )
+
+    return {"ok": True, "rep": row}
+
+class SalesApproveIn(BaseModel):
+    rep_role: str = Field(pattern="^(sales_rep|sales_manager|admin|sdr)$")
+    temp_password: str = Field(min_length=8)
+
+@app.post("/admin/sales/reps/{rep_id}/approve", tags=["Admin","Sales"], summary="Approve rep + create login user")
+def approve_sales_rep(rep_id: str, payload: SalesApproveIn, request: Request):
+    require_admin(request)
+    actor = _actor_email(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        _ensure_plan_row(conn)
+
+        rep = conn.execute("SELECT id, email, status FROM sales_reps WHERE id=%s", (rep_id,)).fetchone()
+        if not rep:
+            raise HTTPException(404, "rep not found")
+
+        # ensure role exists in your existing hr roles table
+        role_row = conn.execute("SELECT id FROM roles WHERE name=%s", (payload.rep_role,)).fetchone()
+        if not role_row:
+            role_id = str(uuid.uuid4())
+            conn.execute("INSERT INTO roles (id, name) VALUES (%s,%s)", (role_id, payload.rep_role))
+        else:
+            role_id = role_row["id"]
+
+        pw_hash = _bcrypt_hash(payload.temp_password)
+
+        # create/update hr user login
+        existing_user = conn.execute("SELECT id FROM hr_users WHERE email=%s", (rep["email"],)).fetchone()
+        if existing_user:
+            conn.execute("UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE WHERE email=%s",
+                         (pw_hash, role_id, rep["email"]))
+        else:
+            conn.execute("INSERT INTO hr_users (id, email, password_hash, role_id, is_active) VALUES (%s,%s,%s,%s,TRUE)",
+                         (str(uuid.uuid4()), rep["email"], pw_hash, role_id))
+
+        conn.execute("UPDATE sales_reps SET status='active', role=%s, updated_at=NOW() WHERE id=%s",
+                     (payload.rep_role, rep_id))
+
+        conn.execute("INSERT INTO sales_rep_plan_acceptance (id, rep_id, plan_version, ip, user_agent) VALUES (%s,%s,%s,%s,%s)",
+                     (str(uuid.uuid4()), rep_id, COMMISSION_PLAN_VERSION, request.client.host if request.client else None, request.headers.get("user-agent")))
+
+        conn.execute("INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
+                     (None, "sales_rep_approved", json.dumps({"rep_id": rep_id, "actor": actor, "role": payload.rep_role})))
+
+    return {"ok": True, "rep_id": rep_id, "status": "active"}
+
+class InviteCreateIn(BaseModel):
+    email: str
+    role: str = Field(pattern="^(sales_rep|sales_manager|admin|sdr)$")
+    expires_hours: int = Field(default=72, ge=1, le=168)
+
+def _hash_invite_token(token: str) -> str:
+    # stable hash, no raw token stored
+    return hashlib.sha256((token + "|" + SESSION_SECRET).encode("utf-8")).hexdigest()
+
+@app.post("/admin/sales/invite", tags=["Admin","Sales"], summary="Create invite link (admin)")
+def create_sales_invite(payload: InviteCreateIn, request: Request):
+    require_admin(request)
+    actor = _actor_email(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        token = uuid.uuid4().hex
+        token_hash = _hash_invite_token(token)
+        inv_id = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(hours=int(payload.expires_hours))
+
+        conn.execute("""
+            INSERT INTO sales_invites (id, email, role, invited_by_email, token_hash, expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (inv_id, payload.email.lower().strip(), payload.role, actor, token_hash, expires_at))
+
+    # you can email this yourself for now
+    invite_url = f"/apply/sales/invite?token={token}"
+    return {"ok": True, "invite_url": invite_url, "expires_at": expires_at.isoformat()}
+
+class InviteAcceptIn(BaseModel):
+    token: str
+    legal_name: str = Field(min_length=1)
+    phone: Optional[str] = None
+    territory: Optional[str] = None
+    vertical: Optional[str] = None
+    password: str = Field(min_length=8)
+
+@app.post("/sales/invite/accept", tags=["Sales"], summary="Accept invite, create login + rep")
+def accept_sales_invite(payload: InviteAcceptIn, request: Request):
+    with db() as conn:
+        ensure_sales_tables(conn)
+        _ensure_plan_row(conn)
+
+        token_hash = _hash_invite_token(payload.token)
+        inv = conn.execute("""
+            SELECT * FROM sales_invites
+            WHERE token_hash=%s AND accepted_at IS NULL AND expires_at > NOW()
+            LIMIT 1
+        """, (token_hash,)).fetchone()
+        if not inv:
+            raise HTTPException(400, "Invalid or expired invite")
+
+        email = inv["email"]
+        role = inv["role"]
+
+        # ensure role exists
+        role_row = conn.execute("SELECT id FROM roles WHERE name=%s", (role,)).fetchone()
+        if not role_row:
+            role_id = str(uuid.uuid4())
+            conn.execute("INSERT INTO roles (id, name) VALUES (%s,%s)", (role_id, role))
+        else:
+            role_id = role_row["id"]
+
+        # create rep record if missing
+        rep = conn.execute("SELECT id FROM sales_reps WHERE email=%s", (email,)).fetchone()
+        if not rep:
+            rep_id = str(uuid.uuid4())
+            code = _new_ref_code()
+            conn.execute("""
+                INSERT INTO sales_reps (id, status, legal_name, email, phone, role, territory, vertical, referral_code)
+                VALUES (%s,'active',%s,%s,%s,%s,%s,%s,%s)
+            """, (rep_id, payload.legal_name, email, payload.phone, role, payload.territory, payload.vertical, code))
+        else:
+            rep_id = rep["id"]
+            conn.execute("""
+                UPDATE sales_reps SET status='active', legal_name=COALESCE(%s, legal_name),
+                    phone=COALESCE(%s, phone), role=%s, territory=COALESCE(%s, territory),
+                    vertical=COALESCE(%s, vertical), updated_at=NOW()
+                WHERE id=%s
+            """, (payload.legal_name, payload.phone, role, payload.territory, payload.vertical, rep_id))
+
+        # create/update hr user
+        pw_hash = _bcrypt_hash(payload.password)
+        existing_user = conn.execute("SELECT id FROM hr_users WHERE email=%s", (email,)).fetchone()
+        if existing_user:
+            conn.execute("UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE WHERE email=%s",
+                         (pw_hash, role_id, email))
+        else:
+            conn.execute("INSERT INTO hr_users (id, email, password_hash, role_id, is_active) VALUES (%s,%s,%s,%s,TRUE)",
+                         (str(uuid.uuid4()), email, pw_hash, role_id))
+
+        conn.execute("UPDATE sales_invites SET accepted_at=NOW() WHERE id=%s", (inv["id"],))
+
+        conn.execute("INSERT INTO sales_rep_plan_acceptance (id, rep_id, plan_version, ip, user_agent) VALUES (%s,%s,%s,%s,%s)",
+                     (str(uuid.uuid4()), rep_id, COMMISSION_PLAN_VERSION, request.client.host if request.client else None, request.headers.get("user-agent")))
+
+    return {"ok": True}
 
 @app.get("/admin/sales/reps", tags=["Admin","Sales"], summary="List sales reps")
-def list_sales_reps(request: Request, limit: int = Query(200, ge=1, le=2000)):
+def list_sales_reps(request: Request, status: Optional[str]=None, limit: int = Query(500, ge=1, le=5000)):
     require_admin(request)
     with db() as conn:
         ensure_sales_tables(conn)
-        rows = conn.execute("""
-            SELECT id, status, legal_name, email, phone, referral_code, agreement_signed_at, w9_received_at, payout_method, created_at
-            FROM sales_reps
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,)).fetchall()
-    return rows
+        sql = "SELECT * FROM sales_reps WHERE 1=1"
+        vals = []
+        if status:
+            sql += " AND status=%s"; vals.append(status)
+        sql += " ORDER BY created_at DESC LIMIT %s"
+        vals.append(limit)
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    return {"ok": True, "reps": rows}
 
-def _get_sales_owner(conn, bridge_account_id: str) -> Optional[str]:
-    # Most recent active ownership row wins
+# --------------------------
+# CRM: companies + contacts (dedupe)
+# --------------------------
+class CompanyUpsertIn(BaseModel):
+    name: str = Field(min_length=1)
+    website: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    company_type: str = Field(default="yard")
+    notes: Optional[str] = None
+
+@app.post("/sales/companies/upsert", tags=["Sales"], summary="Upsert company (dedupe by name+domain)")
+def upsert_company(payload: CompanyUpsertIn, request: Request):
+    rep = require_sales_rep(request)
+    dom = _extract_domain(payload.website)
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        # try existing by domain first
+        row = None
+        if dom:
+            row = conn.execute("SELECT * FROM sales_companies WHERE domain=%s LIMIT 1", (dom,)).fetchone()
+
+        if not row:
+            row = conn.execute("SELECT * FROM sales_companies WHERE lower(name)=lower(%s) AND COALESCE(domain,'')=COALESCE(%s,'') LIMIT 1",
+                               (payload.name, dom or "")).fetchone()
+
+        if row:
+            updated = conn.execute("""
+                UPDATE sales_companies
+                SET website=COALESCE(%s, website),
+                    city=COALESCE(%s, city),
+                    state=COALESCE(%s, state),
+                    company_type=COALESCE(%s, company_type),
+                    notes=COALESCE(%s, notes),
+                    updated_at=NOW()
+                WHERE id=%s
+                RETURNING *
+            """, (payload.website, payload.city, payload.state, payload.company_type, payload.notes, row["id"])).fetchone()
+            return {"ok": True, "company": updated, "deduped": True}
+
+        cid = str(uuid.uuid4())
+        created = conn.execute("""
+            INSERT INTO sales_companies (id, name, domain, website, city, state, company_type, notes)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (cid, payload.name, dom, payload.website, payload.city, payload.state, payload.company_type, payload.notes)).fetchone()
+
+        # default ownership = creating rep (14 day protection)
+        conn.execute("""
+            INSERT INTO sales_company_ownership (id, company_id, owner_rep_id, protection_expires_at, ownership_reason)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (str(uuid.uuid4()), cid, rep["id"], datetime.utcnow() + timedelta(days=14), "lead_created"))
+
+        conn.execute("""
+            INSERT INTO sales_ownership_audit (id, entity_type, entity_id, action, from_rep_id, to_rep_id, reason, actor_email)
+            VALUES (%s,'company',%s,'assign',NULL,%s,%s,%s)
+        """, (str(uuid.uuid4()), cid, rep["id"], "auto-owner on create", (rep["email"] or "")))
+
+        return {"ok": True, "company": created, "deduped": False}
+
+@app.get("/sales/companies", tags=["Sales"], summary="Search companies")
+def list_companies(request: Request, q: Optional[str]=None, limit: int = Query(200, ge=1, le=2000)):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        sql = "SELECT * FROM sales_companies WHERE 1=1"
+        vals = []
+        if q:
+            sql += " AND (name ILIKE %s OR COALESCE(domain,'') ILIKE %s)"
+            vals.extend([f"%{q}%", f"%{q}%"])
+        sql += " ORDER BY updated_at DESC LIMIT %s"
+        vals.append(limit)
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    return {"ok": True, "companies": rows}
+
+class ContactCreateIn(BaseModel):
+    company_id: str
+    name: str
+    title: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    is_primary: bool = False
+
+@app.post("/sales/contacts", tags=["Sales"], summary="Create contact")
+def create_contact(payload: ContactCreateIn, request: Request):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        cid = payload.company_id
+        row = conn.execute("""
+            INSERT INTO sales_contacts (id, company_id, name, title, email, phone, is_primary)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (str(uuid.uuid4()), cid, payload.name, payload.title, payload.email, payload.phone, payload.is_primary)).fetchone()
+    return {"ok": True, "contact": row}
+
+@app.get("/sales/contacts", tags=["Sales"], summary="List contacts for a company")
+def list_contacts(request: Request, company_id: str):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        rows = conn.execute("SELECT * FROM sales_contacts WHERE company_id=%s ORDER BY is_primary DESC, created_at DESC", (company_id,)).fetchall()
+    return {"ok": True, "contacts": rows}
+
+# --------------------------
+# Leads + tasks + activities
+# --------------------------
+class LeadCreateIn(BaseModel):
+    company_name: str = Field(min_length=1)
+    website: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    company_type: str = Field(default="yard")
+    lead_source: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    notes: Optional[str] = None
+
+@app.post("/sales/leads", tags=["Sales"], summary="Create lead (with duplicate detection)")
+def create_lead(payload: LeadCreateIn, request: Request):
+    rep = require_sales_rep(request)
+    dom = _extract_domain(payload.contact_email) or _extract_domain(payload.website)
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        # duplicate detection by domain (same rep scope) – prevent spam duplicates
+        if dom:
+            dup = conn.execute("""
+                SELECT id FROM sales_leads
+                WHERE rep_id=%s AND domain=%s AND stage NOT IN ('closed_won','closed_lost')
+                ORDER BY created_at DESC LIMIT 1
+            """, (rep["id"], dom)).fetchone()
+            if dup:
+                # still create but mark duplicate_of
+                duplicate_of = dup["id"]
+            else:
+                duplicate_of = None
+        else:
+            duplicate_of = None
+
+        # upsert company and link
+        comp = conn.execute("SELECT * FROM sales_companies WHERE domain=%s LIMIT 1", (dom,)).fetchone() if dom else None
+        if not comp:
+            comp_id = str(uuid.uuid4())
+            comp = conn.execute("""
+                INSERT INTO sales_companies (id, name, domain, website, city, state, company_type)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                RETURNING *
+            """, (comp_id, payload.company_name, dom, payload.website, payload.city, payload.state, payload.company_type)).fetchone()
+
+            conn.execute("""
+                INSERT INTO sales_company_ownership (id, company_id, owner_rep_id, protection_expires_at, ownership_reason)
+                VALUES (%s,%s,%s,%s,%s)
+            """, (str(uuid.uuid4()), comp_id, rep["id"], datetime.utcnow() + timedelta(days=14), "lead_created"))
+
+        lead_id = str(uuid.uuid4())
+        row = conn.execute("""
+            INSERT INTO sales_leads (
+              id, rep_id, company_id, company_name, domain, website, city, state,
+              company_type, lead_source, contact_name, contact_title, contact_email, contact_phone,
+              stage, notes, duplicate_of, linked_company_id
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,%s,%s)
+            RETURNING *
+        """, (
+            lead_id, rep["id"], comp["id"], payload.company_name, dom, payload.website, payload.city, payload.state,
+            payload.company_type, payload.lead_source, payload.contact_name, payload.contact_title, payload.contact_email, payload.contact_phone,
+            payload.notes, duplicate_of, comp["id"]
+        )).fetchone()
+
+        conn.execute("INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'sales_lead_created',%s)",
+                     (None, json.dumps({"lead_id": lead_id, "rep_id": str(rep["id"]), "company": payload.company_name})))
+
+    return {"ok": True, "lead": row, "duplicate_of": duplicate_of}
+
+@app.get("/sales/leads", tags=["Sales"], summary="List my leads")
+def list_leads(request: Request, q: Optional[str]=None, stage: Optional[str]=None, limit: int = Query(200, ge=1, le=2000)):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        sql = "SELECT * FROM sales_leads WHERE rep_id=%s"
+        vals = [rep["id"]]
+        if stage:
+            sql += " AND stage=%s"; vals.append(stage)
+        if q:
+            sql += " AND (company_name ILIKE %s OR COALESCE(contact_name,'') ILIKE %s OR COALESCE(contact_email,'') ILIKE %s OR COALESCE(domain,'') ILIKE %s)"
+            vals.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
+        sql += " ORDER BY updated_at DESC, created_at DESC LIMIT %s"
+        vals.append(limit)
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    return {"ok": True, "leads": rows}
+
+class LeadPatchIn(BaseModel):
+    stage: Optional[str] = Field(default=None, pattern="^(new|contacted|qualified|demo_scheduled|demo_done|proposal|negotiation|closed_won|closed_lost)$")
+    notes: Optional[str] = None
+    next_follow_up_at: Optional[datetime] = None
+
+@app.patch("/sales/leads/{lead_id}", tags=["Sales"], summary="Update lead")
+def patch_lead(lead_id: str, payload: LeadPatchIn, request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
+        if not lead:
+            raise HTTPException(404, "Lead not found")
+
+        row = conn.execute("""
+            UPDATE sales_leads
+            SET stage=COALESCE(%s, stage),
+                notes=COALESCE(%s, notes),
+                next_follow_up_at=COALESCE(%s, next_follow_up_at),
+                updated_at=NOW()
+            WHERE id=%s AND rep_id=%s
+            RETURNING *
+        """, (payload.stage, payload.notes, payload.next_follow_up_at, lead_id, rep["id"])).fetchone()
+    return {"ok": True, "lead": row}
+
+class ActivityIn(BaseModel):
+    activity_type: str = Field(pattern="^(call|email|demo|note|text|other)$")
+    notes: Optional[str] = None
+    follow_up_at: Optional[datetime] = None
+
+@app.post("/sales/leads/{lead_id}/activity", tags=["Sales"], summary="Log activity on a lead")
+def log_lead_activity(lead_id: str, payload: ActivityIn, request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
+        if not lead:
+            raise HTTPException(404, "Lead not found")
+
+        act = conn.execute("""
+            INSERT INTO sales_activities (id, rep_id, lead_id, activity_type, notes, follow_up_at)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (str(uuid.uuid4()), rep["id"], lead_id, payload.activity_type, payload.notes, payload.follow_up_at)).fetchone()
+
+        conn.execute("""
+            UPDATE sales_leads
+            SET last_activity_at=NOW(),
+                next_follow_up_at=COALESCE(%s, next_follow_up_at),
+                updated_at=NOW()
+            WHERE id=%s
+        """, (payload.follow_up_at, lead_id))
+
+    return {"ok": True, "activity": act}
+
+@app.get("/sales/followups/due", tags=["Sales"], summary="Leads due for follow-up")
+def due_followups(request: Request, days_ahead: int = Query(0, ge=0, le=30)):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        rows = conn.execute("""
+            SELECT *
+            FROM sales_leads
+            WHERE rep_id=%s
+              AND stage NOT IN ('closed_won','closed_lost')
+              AND next_follow_up_at IS NOT NULL
+              AND next_follow_up_at <= (NOW() + (%s || ' days')::interval)
+            ORDER BY next_follow_up_at ASC
+            LIMIT 500
+        """, (rep["id"], days_ahead)).fetchall()
+    return {"ok": True, "leads": rows}
+
+class TaskCreateIn(BaseModel):
+    title: str
+    due_at: datetime
+    lead_id: Optional[str] = None
+    company_id: Optional[str] = None
+    deal_id: Optional[str] = None
+
+@app.post("/sales/tasks", tags=["Sales"], summary="Create task")
+def create_task(payload: TaskCreateIn, request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        row = conn.execute("""
+            INSERT INTO sales_tasks (id, rep_id, lead_id, company_id, deal_id, title, due_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (str(uuid.uuid4()), rep["id"], payload.lead_id, payload.company_id, payload.deal_id, payload.title, payload.due_at)).fetchone()
+    return {"ok": True, "task": row}
+
+@app.get("/sales/tasks/due", tags=["Sales"], summary="Tasks due today/soon")
+def tasks_due(request: Request, days_ahead: int = Query(0, ge=0, le=30)):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        rows = conn.execute("""
+            SELECT *
+            FROM sales_tasks
+            WHERE rep_id=%s AND status='open' AND due_at <= (NOW() + (%s || ' days')::interval)
+            ORDER BY due_at ASC
+            LIMIT 500
+        """, (rep["id"], days_ahead)).fetchall()
+    return {"ok": True, "tasks": rows}
+
+@app.post("/sales/tasks/{task_id}/done", tags=["Sales"], summary="Complete task")
+def complete_task(task_id: str, request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        row = conn.execute("""
+            UPDATE sales_tasks
+            SET status='done', completed_at=NOW()
+            WHERE id=%s AND rep_id=%s
+            RETURNING *
+        """, (task_id, rep["id"])).fetchone()
+        if not row:
+            raise HTTPException(404, "Task not found")
+    return {"ok": True, "task": row}
+
+# --------------------------
+# Deals pipeline
+# --------------------------
+class DealCreateIn(BaseModel):
+    company_id: str
+    proposed_plan: Optional[str] = None
+    expected_go_live: Optional[str] = None  # YYYY-MM-DD
+    expected_mrr_cents: Optional[int] = None
+    expected_tons_per_month: Optional[int] = None
+    expected_bols_per_month: Optional[int] = None
+    probability: int = Field(default=20, ge=0, le=100)
+    notes: Optional[str] = None
+
+@app.post("/sales/deals", tags=["Sales"], summary="Create deal")
+def create_deal(payload: DealCreateIn, request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        deal_id = str(uuid.uuid4())
+        row = conn.execute("""
+            INSERT INTO sales_deals (
+              id, company_id, owner_rep_id, proposed_plan, expected_go_live, expected_mrr_cents,
+              expected_tons_per_month, expected_bols_per_month, probability, notes
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (
+            deal_id, payload.company_id, rep["id"], payload.proposed_plan,
+            datetime.fromisoformat(payload.expected_go_live).date() if payload.expected_go_live else None,
+            payload.expected_mrr_cents, payload.expected_tons_per_month, payload.expected_bols_per_month,
+            payload.probability, payload.notes
+        )).fetchone()
+    return {"ok": True, "deal": row}
+
+@app.get("/sales/deals", tags=["Sales"], summary="List deals (rep or manager)")
+def list_deals(request: Request, stage: Optional[str]=None, q: Optional[str]=None, limit: int = Query(300, ge=1, le=5000)):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        sql = """
+            SELECT d.*, c.name as company_name, c.company_type, c.domain
+            FROM sales_deals d
+            JOIN sales_companies c ON c.id=d.company_id
+            WHERE 1=1
+        """
+        vals = []
+        if rep["role"] == "sales_rep":
+            sql += " AND d.owner_rep_id=%s"; vals.append(rep["id"])
+        if stage:
+            sql += " AND d.stage=%s"; vals.append(stage)
+        if q:
+            sql += " AND (c.name ILIKE %s OR COALESCE(c.domain,'') ILIKE %s)"
+            vals.extend([f"%{q}%", f"%{q}%"])
+        sql += " ORDER BY d.updated_at DESC LIMIT %s"; vals.append(limit)
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    return {"ok": True, "deals": rows}
+
+class DealPatchIn(BaseModel):
+    stage: Optional[str] = Field(default=None, pattern="^(new|contacted|qualified|demo_scheduled|demo_done|proposal|negotiation|closed_won|closed_lost)$")
+    probability: Optional[int] = Field(default=None, ge=0, le=100)
+    proposed_plan: Optional[str] = None
+    expected_go_live: Optional[str] = None
+    expected_mrr_cents: Optional[int] = None
+    expected_tons_per_month: Optional[int] = None
+    expected_bols_per_month: Optional[int] = None
+    notes: Optional[str] = None
+
+@app.patch("/sales/deals/{deal_id}", tags=["Sales"], summary="Update deal")
+def patch_deal(deal_id: str, payload: DealPatchIn, request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        d = conn.execute("SELECT * FROM sales_deals WHERE id=%s", (deal_id,)).fetchone()
+        if not d:
+            raise HTTPException(404, "Deal not found")
+        if rep["role"] == "sales_rep" and str(d["owner_rep_id"]) != str(rep["id"]):
+            raise HTTPException(403, "Not your deal")
+
+        new_stage = payload.stage
+        stage_entered = datetime.utcnow() if new_stage and new_stage != d["stage"] else d["stage_entered_at"]
+
+        row = conn.execute("""
+            UPDATE sales_deals
+            SET stage=COALESCE(%s, stage),
+                stage_entered_at=%s,
+                probability=COALESCE(%s, probability),
+                proposed_plan=COALESCE(%s, proposed_plan),
+                expected_go_live=COALESCE(%s, expected_go_live),
+                expected_mrr_cents=COALESCE(%s, expected_mrr_cents),
+                expected_tons_per_month=COALESCE(%s, expected_tons_per_month),
+                expected_bols_per_month=COALESCE(%s, expected_bols_per_month),
+                notes=COALESCE(%s, notes),
+                closed_at=CASE WHEN COALESCE(%s, stage) IN ('closed_won','closed_lost') THEN NOW() ELSE closed_at END,
+                updated_at=NOW()
+            WHERE id=%s
+            RETURNING *
+        """, (
+            payload.stage, stage_entered,
+            payload.probability,
+            payload.proposed_plan,
+            datetime.fromisoformat(payload.expected_go_live).date() if payload.expected_go_live else None,
+            payload.expected_mrr_cents,
+            payload.expected_tons_per_month,
+            payload.expected_bols_per_month,
+            payload.notes,
+            payload.stage,
+            deal_id
+        )).fetchone()
+    return {"ok": True, "deal": row}
+
+# --------------------------
+# Onboarding checklists
+# --------------------------
+ONBOARDING_TEMPLATE = [
+    ("business_verification", "Business verification"),
+    ("contact_confirmed", "Contact confirmed"),
+    ("plan_selected", "Plan selected"),
+    ("billing_method_selected", "Billing method selected (ACH/card/manual)"),
+    ("training_scheduled", "Training scheduled"),
+    ("training_completed", "Training completed"),
+    ("first_inventory_added", "First inventory added"),
+    ("first_vendor_sheet_uploaded", "First vendor sheet uploaded"),
+    ("first_contract_created", "First contract created"),
+    ("first_bol_issued", "First BOL issued"),
+]
+
+def _compute_checklist_status(steps) -> str:
+    # red if any required blocked; green if all required done; else yellow
+    req = [s for s in steps if s["is_required"]]
+    if any(s["status"] == "blocked" for s in req):
+        return "red"
+    if req and all(s["status"] == "done" for s in req):
+        return "green"
+    return "yellow"
+
+@app.post("/sales/onboarding/create", tags=["Sales"], summary="Create onboarding checklist for company")
+def create_onboarding(company_id: str, deal_id: Optional[str]=None, request: Request = None):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        existing = conn.execute("SELECT * FROM onboarding_checklists WHERE company_id=%s ORDER BY created_at DESC LIMIT 1", (company_id,)).fetchone()
+        if existing:
+            return {"ok": True, "checklist": existing, "created": False}
+
+        cid = str(uuid.uuid4())
+        chk = conn.execute("""
+            INSERT INTO onboarding_checklists (id, company_id, deal_id, status)
+            VALUES (%s,%s,%s,'yellow')
+            RETURNING *
+        """, (cid, company_id, deal_id)).fetchone()
+
+        for key, label in ONBOARDING_TEMPLATE:
+            conn.execute("""
+                INSERT INTO onboarding_steps (id, checklist_id, step_key, label, is_required, status)
+                VALUES (%s,%s,%s,%s,TRUE,'todo')
+            """, (str(uuid.uuid4()), cid, key, label))
+
+    return {"ok": True, "checklist": chk, "created": True}
+
+@app.get("/sales/onboarding", tags=["Sales"], summary="Get onboarding checklist + steps for company")
+def get_onboarding(company_id: str, request: Request):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        chk = conn.execute("SELECT * FROM onboarding_checklists WHERE company_id=%s ORDER BY created_at DESC LIMIT 1", (company_id,)).fetchone()
+        if not chk:
+            return {"ok": True, "checklist": None, "steps": []}
+        steps = conn.execute("SELECT * FROM onboarding_steps WHERE checklist_id=%s ORDER BY label ASC", (chk["id"],)).fetchall()
+    return {"ok": True, "checklist": chk, "steps": steps}
+
+class StepPatchIn(BaseModel):
+    status: str = Field(pattern="^(todo|doing|done|blocked)$")
+    blocker_notes: Optional[str] = None
+
+@app.patch("/sales/onboarding/step/{step_id}", tags=["Sales"], summary="Update onboarding step")
+def patch_onboarding_step(step_id: str, payload: StepPatchIn, request: Request):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        step = conn.execute("SELECT * FROM onboarding_steps WHERE id=%s", (step_id,)).fetchone()
+        if not step:
+            raise HTTPException(404, "Step not found")
+
+        updated = conn.execute("""
+            UPDATE onboarding_steps
+            SET status=%s, blocker_notes=COALESCE(%s, blocker_notes), updated_at=NOW()
+            WHERE id=%s
+            RETURNING *
+        """, (payload.status, payload.blocker_notes, step_id)).fetchone()
+
+        # recompute checklist status
+        steps = conn.execute("SELECT * FROM onboarding_steps WHERE checklist_id=%s", (step["checklist_id"],)).fetchall()
+        status = _compute_checklist_status(steps)
+        conn.execute("UPDATE onboarding_checklists SET status=%s, updated_at=NOW() WHERE id=%s", (status, step["checklist_id"]))
+
+    return {"ok": True, "step": updated, "checklist_status": status}
+
+@app.get("/sales/onboarding/stuck", tags=["Sales"], summary="Onboarding stuck (red/yellow)")
+def onboarding_stuck(request: Request, status: str = Query("red", pattern="^(red|yellow)$"), limit: int = Query(200, ge=1, le=2000)):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        sql = """
+          SELECT o.*, c.name as company_name
+          FROM onboarding_checklists o
+          JOIN sales_companies c ON c.id=o.company_id
+          WHERE o.status=%s
+        """
+        vals = [status]
+        if rep["role"] == "sales_rep":
+            sql += " AND EXISTS (SELECT 1 FROM sales_company_ownership co WHERE co.company_id=o.company_id AND co.owner_rep_id=%s AND co.ownership_end IS NULL)"
+            vals.append(rep["id"])
+        sql += " ORDER BY o.updated_at DESC LIMIT %s"
+        vals.append(limit)
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    return {"ok": True, "checklists": rows}
+
+# --------------------------
+# Assets
+# --------------------------
+@app.get("/sales/assets", tags=["Sales"], summary="List sales collateral/templates")
+def list_assets(request: Request):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        rows = conn.execute("SELECT * FROM sales_assets ORDER BY updated_at DESC").fetchall()
+    return {"ok": True, "assets": rows}
+
+class AssetUpsertIn(BaseModel):
+    name: str
+    asset_type: str
+    url: str
+    notes: Optional[str] = None
+
+@app.post("/admin/sales/assets", tags=["Admin","Sales"], summary="Add/update asset (admin)")
+def upsert_asset(payload: AssetUpsertIn, request: Request):
+    require_admin(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        existing = conn.execute("SELECT * FROM sales_assets WHERE name=%s AND asset_type=%s LIMIT 1", (payload.name, payload.asset_type)).fetchone()
+        if existing:
+            row = conn.execute("""
+                UPDATE sales_assets SET url=%s, notes=COALESCE(%s, notes), updated_at=NOW()
+                WHERE id=%s
+                RETURNING *
+            """, (payload.url, payload.notes, existing["id"])).fetchone()
+            return {"ok": True, "asset": row, "updated": True}
+
+        row = conn.execute("""
+            INSERT INTO sales_assets (id, name, asset_type, url, notes)
+            VALUES (%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (str(uuid.uuid4()), payload.name, payload.asset_type, payload.url, payload.notes)).fetchone()
+        return {"ok": True, "asset": row, "updated": False}
+
+# --------------------------
+# Manual revenue intake + commissions
+# --------------------------
+class RevenuePostIn(BaseModel):
+    company_id: str
+    revenue_type: str = Field(pattern="^(subscription|overage|addon|one_time)$")
+    amount_cents: int = Field(ge=1)
+    collected_at: datetime
+    currency: str = "USD"
+    external_ref: Optional[str] = None
+    deal_id: Optional[str] = None
+    proposed_plan: Optional[str] = None  # used for activation bonus if first payment
+
+def _get_company_owner(conn, company_id: str) -> Optional[str]:
     row = conn.execute("""
-      SELECT sales_owner_rep_id, house_account
-      FROM account_ownership
-      WHERE bridge_account_id=%s AND ownership_end IS NULL
-      ORDER BY ownership_start DESC
-      LIMIT 1
-    """, (bridge_account_id,)).fetchone()
+        SELECT owner_rep_id, house_account
+        FROM sales_company_ownership
+        WHERE company_id=%s AND ownership_end IS NULL
+        ORDER BY ownership_start DESC
+        LIMIT 1
+    """, (company_id,)).fetchone()
     if not row or row["house_account"]:
         return None
-    return row["sales_owner_rep_id"]
+    return row["owner_rep_id"]
 
-def _month_index(first_paid_at: datetime, paid_at: datetime) -> int:
-    # 1-based month number from first payment
-    return (paid_at.year - first_paid_at.year) * 12 + (paid_at.month - first_paid_at.month) + 1
-
-def _upsert_sales_account(conn, bridge_account_id: str, payload: dict):
-    company = payload.get("company_name")
-    plan = (payload.get("plan_tier") or payload.get("plan") or "").lower() or None
-    status = payload.get("status") or "unknown"
-    conn.execute("""
-      INSERT INTO sales_accounts (id, bridge_account_id, company_name, plan_tier, status)
-      VALUES (%s,%s,%s,%s,%s)
-      ON CONFLICT (bridge_account_id)
-      DO UPDATE SET company_name=COALESCE(EXCLUDED.company_name, sales_accounts.company_name),
-                    plan_tier=COALESCE(EXCLUDED.plan_tier, sales_accounts.plan_tier),
-                    status=COALESCE(EXCLUDED.status, sales_accounts.status),
-                    updated_at=NOW()
-    """, (str(uuid.uuid4()), bridge_account_id, company, plan, status))
-
-def _ensure_owner_from_referral(conn, bridge_account_id: str, referral_code: Optional[str], created_at: datetime):
-    if not referral_code:
-        return
-    rep = conn.execute("SELECT id FROM sales_reps WHERE referral_code=%s", (referral_code,)).fetchone()
-    if not rep:
-        return
-    # If no owner exists yet, set protection + provisional owner (you can override)
-    existing = conn.execute("""
-      SELECT 1 FROM account_ownership WHERE bridge_account_id=%s AND ownership_end IS NULL
-    """, (bridge_account_id,)).fetchone()
-    if existing:
-        return
-    conn.execute("""
-      INSERT INTO account_ownership (id, bridge_account_id, sales_owner_rep_id, protection_expires_at, ownership_reason)
-      VALUES (%s,%s,%s,%s,%s)
-    """, (str(uuid.uuid4()), bridge_account_id, rep["id"], created_at + timedelta(days=14), "lead_referral_protection"))
-
-@app.post("/admin/sales/sync_bridge_nightly", tags=["Admin","Sales"], summary="Nightly: process BRidge events into commission ledger")
-def sync_bridge_nightly(request: Request, limit: int = Query(5000, ge=1, le=20000)):
-    require_admin(request)
-    processed = 0
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        state = conn.execute("SELECT last_created_at FROM sales_sync_state WHERE id='bridge_commission_sync'").fetchone()
-        cursor = state["last_created_at"]
-
-        rows = conn.execute("""
-          SELECT created_at, source_id, event_type, payload
-          FROM atlas_ingest_log
-          WHERE lower(source_system)='bridge'
-            AND created_at > %s
-          ORDER BY created_at ASC
-          LIMIT %s
-        """, (cursor, limit)).fetchall()
-
-        for r in rows:
-            created_at = r["created_at"]
-            ev_type = (r["event_type"] or "").upper()
-            payload = r["payload"] or {}
-
-            bridge_account_id = payload.get("bridge_account_id") or payload.get("account_id") or payload.get("tenant_id")
-            if not bridge_account_id:
-                continue
-
-            _upsert_sales_account(conn, bridge_account_id, payload)
-
-            # Optional: claim owner from referral code early (lead protection)
-            _ensure_owner_from_referral(conn, bridge_account_id, payload.get("referral_code"), created_at)
-
-            # Map BRidge event types → commission event types
-            mapped = None
-            amount_cents = int(payload.get("amount_cents") or 0)
-            currency = (payload.get("currency") or "USD").upper()
-            external_ref = payload.get("invoice_id") or payload.get("payment_intent") or payload.get("external_ref")
-
-            if ev_type in ("SUBSCRIPTION_PAYMENT_COLLECTED","SUBSCRIPTION_PAID","INVOICE_PAID"):
-                mapped = "subscription_payment"
-            elif ev_type in ("OVERAGE_PAYMENT_COLLECTED","OVERAGE_PAID"):
-                mapped = "overage_payment"
-            elif ev_type in ("REFUND_ISSUED","CHARGEBACK"):
-                mapped = "refund"
-                amount_cents = -abs(amount_cents)
-            elif ev_type in ("MILESTONE_HIT","FIRST_BOL","FIRST_TONS","FIRST_CONTRACT"):
-                mapped = "milestone"
-
-            if not mapped:
-                continue
-
-            # Insert commission_event idempotently
-            try:
-                ce = conn.execute("""
-                  INSERT INTO commission_events (id, bridge_account_id, event_type, external_ref, amount_cents, currency, occurred_at, payload)
-                  VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                  RETURNING id
-                """, (str(uuid.uuid4()), bridge_account_id, mapped, external_ref, amount_cents, currency, created_at, json.dumps(payload))).fetchone()
-            except Exception:
-                # likely UNIQUE(event_type, external_ref) collision
-                ce = None
-
-            # Now generate ledger lines off this event
-            if ce:
-                _apply_commission_rules(conn, bridge_account_id, mapped, created_at, amount_cents, payload, ce["id"])
-
-            processed += 1
-            cursor = created_at
-
-        # advance cursor
-        conn.execute("UPDATE sales_sync_state SET last_created_at=%s WHERE id='bridge_commission_sync'", (cursor,))
-
-    return {"ok": True, "processed": processed}
-
-def _ensure_first_paid_at(conn, bridge_account_id: str, paid_at: datetime):
-    row = conn.execute("SELECT first_paid_at FROM sales_accounts WHERE bridge_account_id=%s", (bridge_account_id,)).fetchone()
-    if row and row["first_paid_at"]:
-        return row["first_paid_at"]
-    conn.execute("UPDATE sales_accounts SET first_paid_at=%s WHERE bridge_account_id=%s", (paid_at, bridge_account_id))
-    return paid_at
-
-def _activation_awarded(conn, bridge_account_id: str) -> bool:
-    row = conn.execute("""
-      SELECT 1 FROM commission_ledger
-      WHERE bridge_account_id=%s AND line_type='activation_bonus'
-      LIMIT 1
-    """, (bridge_account_id,)).fetchone()
-    return bool(row)
-
-def _milestone_seen(conn, bridge_account_id: str) -> bool:
-    row = conn.execute("""
-      SELECT 1 FROM commission_events
-      WHERE bridge_account_id=%s AND event_type='milestone'
-      LIMIT 1
-    """, (bridge_account_id,)).fetchone()
-    return bool(row)
-
-def _apply_commission_rules(conn, bridge_account_id: str, mapped_type: str, occurred_at: datetime, amount_cents: int, payload: dict, commission_event_id: str):
-    rep_id = _get_sales_owner(conn, bridge_account_id)
-    if not rep_id:
-        return  # house or unowned = no commission
-
-    plan_tier = (payload.get("plan_tier") or payload.get("plan") or "").lower()
-
-    # subscription payments -> residuals + possible activation vesting
-    if mapped_type == "subscription_payment":
-        first_paid_at = _ensure_first_paid_at(conn, bridge_account_id, occurred_at)
-        mi = _month_index(first_paid_at, occurred_at)
-
-        # residual rate based on month index
-        rate = MRR_RATE_Y1 if mi <= 12 else (MRR_RATE_Y2 if mi <= 24 else 0.0)
-        if rate > 0:
-            comm = int(round(abs(amount_cents) * rate))
-            conn.execute("""
-              INSERT INTO commission_ledger (id, rep_id, bridge_account_id, commission_event_id, line_type, amount_cents, vesting_status, scheduled_earn_date)
-              VALUES (%s,%s,%s,%s,'residual_mrr',%s,'earned',%s)
-            """, (str(uuid.uuid4()), rep_id, bridge_account_id, commission_event_id, comm, occurred_at))
-
-        # activation vesting only if milestone exists + not previously awarded
-        if (not _activation_awarded(conn, bridge_account_id)) and _milestone_seen(conn, bridge_account_id):
-            bonus_total = PLAN_ACTIVATION.get(plan_tier or "", 0)
-            if bonus_total > 0:
-                for pct, month_n in ACTIVATION_VESTING:
-                    scheduled = occurred_at + timedelta(days=30*month_n)
-                    conn.execute("""
-                      INSERT INTO commission_ledger (id, rep_id, bridge_account_id, commission_event_id, line_type, amount_cents, vesting_status, scheduled_earn_date)
-                      VALUES (%s,%s,%s,%s,'activation_bonus',%s,'pending',%s)
-                    """, (str(uuid.uuid4()), rep_id, bridge_account_id, commission_event_id, int(round(bonus_total * pct)), scheduled))
-
-    # milestone event might arrive before first payment — just store it and wait
-    elif mapped_type == "milestone":
+def _ensure_activation_tranches(conn, rep_id: str, company_id: str, plan_key: str, collected_at: datetime):
+    # prevent duplicate activation bonus
+    exists = conn.execute("""
+        SELECT 1 FROM commission_ledger
+        WHERE rep_id=%s AND company_id=%s AND line_type='activation_bonus'
+        LIMIT 1
+    """, (rep_id, company_id)).fetchone()
+    if exists:
         return
 
-    # overage payments -> 2%
-    elif mapped_type == "overage_payment":
-        comm = int(round(abs(amount_cents) * OVERAGE_RATE))
-        if comm:
-            conn.execute("""
-              INSERT INTO commission_ledger (id, rep_id, bridge_account_id, commission_event_id, line_type, amount_cents, vesting_status, scheduled_earn_date)
-              VALUES (%s,%s,%s,%s,'overage_residual',%s,'earned',%s)
-            """, (str(uuid.uuid4()), rep_id, bridge_account_id, commission_event_id, comm, occurred_at))
+    bonus_map = PLAN_RULES_V1["activation_bonus"]
+    total = int(bonus_map.get((plan_key or "").lower(), 0))
+    if total <= 0:
+        return
 
-    # refunds/chargebacks -> clawback (negative)
-    elif mapped_type == "refund":
-        # claw back proportional amounts if you have external_ref mapping later;
-        # for now: create a negative adjustment equal to OVERAGE/MRR computed previously is harder.
-        # Minimal: record the refund as a negative manual adjustment for review.
+    for tranche in PLAN_RULES_V1["activation_vesting"]:
+        pct = tranche["pct"]
+        months = tranche["months"]
+        amt = int(round(total * pct))
+        net30 = collected_at + timedelta(days=int(PLAN_RULES_V1["net30_days"])) + timedelta(days=30*months)
         conn.execute("""
-          INSERT INTO commission_ledger (id, rep_id, bridge_account_id, commission_event_id, line_type, amount_cents, vesting_status, scheduled_earn_date)
-          VALUES (%s,%s,%s,%s,'clawback',%s,'earned',%s)
-        """, (str(uuid.uuid4()), rep_id, bridge_account_id, commission_event_id, int(round(amount_cents * 0.15)), occurred_at))
+            INSERT INTO commission_ledger (id, rep_id, company_id, revenue_event_id, deal_id, line_type, amount_cents, status, net30_release_at, notes)
+            VALUES (%s,%s,%s,NULL,NULL,'activation_bonus',%s,'pending',%s,%s)
+        """, (str(uuid.uuid4()), rep_id, company_id, amt, net30, f"Activation tranche {int(pct*100)}% @ month {months}"))
 
-@app.post("/admin/sales/run_payouts", tags=["Admin","Sales"], summary="Create payout batches (net-30)")
-def run_payouts(request: Request, period_start: str, period_end: str):
+def _commission_for_revenue(revenue_type: str, amount_cents: int, month_index: int) -> int:
+    if revenue_type == "overage":
+        return int(round(amount_cents * float(PLAN_RULES_V1["overage_pct"])))
+    if revenue_type == "subscription":
+        if month_index <= int(PLAN_RULES_V1["mrr"]["months_y1"]):
+            return int(round(amount_cents * float(PLAN_RULES_V1["mrr"]["y1_pct"])))
+        if month_index <= int(PLAN_RULES_V1["mrr"]["months_y2"]):
+            return int(round(amount_cents * float(PLAN_RULES_V1["mrr"]["y2_pct"])))
+        return 0
+    if revenue_type in ("addon","one_time"):
+        # treat like subscription for now (you can change later)
+        return int(round(amount_cents * float(PLAN_RULES_V1["mrr"]["y1_pct"])))
+    return 0
+
+def _month_index_from_first(conn, company_id: str, collected_at: datetime) -> int:
+    # month index based on first subscription payment recorded
+    first = conn.execute("""
+        SELECT MIN(collected_at) AS first_at
+        FROM revenue_events
+        WHERE company_id=%s AND revenue_type='subscription'
+    """, (company_id,)).fetchone()
+    if not first or not first["first_at"]:
+        return 1
+    fa = first["first_at"]
+    return (collected_at.year - fa.year) * 12 + (collected_at.month - fa.month) + 1
+
+@app.post("/admin/sales/revenue/post", tags=["Admin","Sales"], summary="Manual revenue posting (admin)")
+def post_revenue(payload: RevenuePostIn, request: Request):
     require_admin(request)
-    # period_start/end as YYYY-MM-DD
-    ps = datetime.fromisoformat(period_start).date()
-    pe = datetime.fromisoformat(period_end).date()
-    net30 = (pe + timedelta(days=30))
+    actor = _actor_email(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        _ensure_plan_row(conn)
 
+        # create revenue event
+        ev_id = str(uuid.uuid4())
+        ev = conn.execute("""
+            INSERT INTO revenue_events (id, company_id, revenue_type, amount_cents, currency, collected_at, external_ref, created_by_email)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """, (ev_id, payload.company_id, payload.revenue_type, payload.amount_cents, payload.currency, payload.collected_at, payload.external_ref, actor)).fetchone()
+
+        rep_id = _get_company_owner(conn, payload.company_id)
+        if not rep_id:
+            return {"ok": True, "revenue_event": ev, "commission_created": False, "reason": "No owner or house account"}
+
+        mi = _month_index_from_first(conn, payload.company_id, payload.collected_at)
+        comm_amt = _commission_for_revenue(payload.revenue_type, payload.amount_cents, mi)
+        net30 = payload.collected_at + timedelta(days=int(PLAN_RULES_V1["net30_days"]))
+
+        if comm_amt > 0:
+            conn.execute("""
+                INSERT INTO commission_ledger (id, rep_id, company_id, revenue_event_id, deal_id, line_type, amount_cents, status, net30_release_at, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)
+            """, (
+                str(uuid.uuid4()),
+                rep_id,
+                payload.company_id,
+                ev_id,
+                payload.deal_id,
+                "overage_residual" if payload.revenue_type == "overage" else "residual_mrr",
+                comm_amt,
+                net30,
+                f"{payload.revenue_type} month_index={mi}"
+            ))
+
+        # activation schedule: only when first subscription is posted + plan_key provided
+        if payload.revenue_type == "subscription" and payload.proposed_plan:
+            first_sub = conn.execute("""
+                SELECT COUNT(*)::int AS cnt
+                FROM revenue_events
+                WHERE company_id=%s AND revenue_type='subscription'
+            """, (payload.company_id,)).fetchone()
+            if first_sub and first_sub["cnt"] == 1:
+                _ensure_activation_tranches(conn, rep_id, payload.company_id, payload.proposed_plan, payload.collected_at)
+
+    return {"ok": True, "revenue_event": ev, "commission_created": True}
+
+@app.get("/admin/sales/revenue", tags=["Admin","Sales"], summary="List revenue events (admin)")
+def list_revenue(request: Request, limit: int = Query(500, ge=1, le=5000)):
+    require_admin(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        rows = conn.execute("""
+            SELECT r.*, c.name as company_name
+            FROM revenue_events r
+            JOIN sales_companies c ON c.id=r.company_id
+            ORDER BY r.collected_at DESC
+            LIMIT %s
+        """, (limit,)).fetchall()
+    return {"ok": True, "revenue": rows}
+
+@app.get("/sales/ledger", tags=["Sales"], summary="My commission ledger")
+def my_ledger(request: Request, limit: int = Query(500, ge=1, le=5000)):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        rows = conn.execute("""
+            SELECT l.*, c.name as company_name
+            FROM commission_ledger l
+            JOIN sales_companies c ON c.id=l.company_id
+            WHERE l.rep_id=%s
+            ORDER BY l.created_at DESC
+            LIMIT %s
+        """, (rep["id"], limit)).fetchall()
+    return {"ok": True, "ledger": rows}
+
+# --------------------------
+# Dashboards
+# --------------------------
+@app.get("/sales/dashboard", tags=["Sales"], summary="Rep dashboard summary")
+def rep_dashboard(request: Request):
+    rep = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        leads_due = conn.execute("""
+            SELECT COUNT(*)::int AS cnt
+            FROM sales_leads
+            WHERE rep_id=%s AND stage NOT IN ('closed_won','closed_lost')
+              AND next_follow_up_at IS NOT NULL AND next_follow_up_at <= NOW()
+        """, (rep["id"],)).fetchone()["cnt"]
+
+        tasks_due = conn.execute("""
+            SELECT COUNT(*)::int AS cnt
+            FROM sales_tasks
+            WHERE rep_id=%s AND status='open' AND due_at <= NOW()
+        """, (rep["id"],)).fetchone()["cnt"]
+
+        pipeline = conn.execute("""
+            SELECT stage, COUNT(*)::int AS cnt
+            FROM sales_deals
+            WHERE owner_rep_id=%s
+            GROUP BY 1 ORDER BY 1
+        """, (rep["id"],)).fetchall()
+
+        onboarding_red = conn.execute("""
+            SELECT COUNT(*)::int AS cnt
+            FROM onboarding_checklists o
+            WHERE o.status='red'
+              AND EXISTS (SELECT 1 FROM sales_company_ownership co WHERE co.company_id=o.company_id AND co.owner_rep_id=%s AND co.ownership_end IS NULL)
+        """, (rep["id"],)).fetchone()["cnt"]
+
+        pending_comm = conn.execute("""
+            SELECT COALESCE(SUM(amount_cents),0)::bigint AS cents
+            FROM commission_ledger
+            WHERE rep_id=%s AND status='pending'
+        """, (rep["id"],)).fetchone()["cents"]
+
+    return {"ok": True, "leads_due": leads_due, "tasks_due": tasks_due, "pipeline": pipeline, "onboarding_red": onboarding_red, "pending_commission_cents": pending_comm}
+
+@app.get("/admin/sales/dashboard", tags=["Admin","Sales"], summary="Manager/admin dashboard summary")
+def admin_dashboard_sales(request: Request):
+    require_sales_manager(request)
     with db() as conn:
         ensure_sales_tables(conn)
 
-        # eligible = earned/pending lines whose scheduled_earn_date is within period and <= period_end
-        rows = conn.execute("""
-          SELECT rep_id, id as ledger_id, amount_cents
-          FROM commission_ledger
-          WHERE vesting_status IN ('earned','pending')
-            AND scheduled_earn_date::date BETWEEN %s AND %s
-        """, (ps, pe)).fetchall()
+        pipeline = conn.execute("""
+            SELECT stage, COUNT(*)::int AS cnt
+            FROM sales_deals
+            GROUP BY 1 ORDER BY 1
+        """).fetchall()
 
-        # group by rep
-        by_rep = {}
-        for r in rows:
-            by_rep.setdefault(r["rep_id"], []).append(r)
+        onboarding = conn.execute("""
+            SELECT status, COUNT(*)::int AS cnt
+            FROM onboarding_checklists
+            GROUP BY 1 ORDER BY 1
+        """).fetchall()
 
-        payouts = []
-        for rep_id, lines in by_rep.items():
-            payout_id = str(uuid.uuid4())
-            total = sum(int(x["amount_cents"]) for x in lines)
-            conn.execute("""
-              INSERT INTO rep_payouts (id, rep_id, period_start, period_end, net30_release_date, total_cents, status)
-              VALUES (%s,%s,%s,%s,%s,%s,'pending')
-            """, (payout_id, rep_id, ps, pe, net30, total))
+        pending = conn.execute("""
+            SELECT COALESCE(SUM(amount_cents),0)::bigint AS cents
+            FROM commission_ledger
+            WHERE status='pending'
+        """).fetchone()["cents"]
 
-            for ln in lines:
-                conn.execute("""
-                  INSERT INTO rep_payout_lines (id, payout_id, ledger_id, amount_cents)
-                  VALUES (%s,%s,%s,%s)
-                """, (str(uuid.uuid4()), payout_id, ln["ledger_id"], ln["amount_cents"]))
+    return {"ok": True, "pipeline": pipeline, "onboarding": onboarding, "pending_commission_cents": pending}
 
-            payouts.append({"rep_id": rep_id, "payout_id": payout_id, "total_cents": total})
-
-        return {"ok": True, "payouts_created": len(payouts), "payouts": payouts}
-#  ----- BRidge Sales -----
-
+# ----- BRidge Sales -----
 
 # ------ App --------
 # Serve /static/* (HTML/JS/JSON)
@@ -577,17 +1586,27 @@ async def add_request_id(request: Request, call_next):
 if PROM_ENABLED:
     Instrumentator().instrument(app).expose(app)
 
-# --------------------------
-# DB helper
-# --------------------------
+
+# ---- DB helper ----
 def db():
     if not DB_URL:
         raise RuntimeError("DATABASE_URL missing")
     return psycopg.connect(DB_URL, autocommit=True, row_factory=dict_row)
+# ---- DB helper ----
 
-# --------------------------
-# Passive ingestion
-# --------------------------
+# ----- startup events -----
+@app.on_event("startup")
+def _startup_sales_tables():
+    try:
+        with db() as conn:
+            ensure_sales_tables(conn)
+            _ensure_plan_row(conn)
+    except Exception as e:
+        # don't crash boot in dev if DB is unavailable
+        log.warning("sales_startup_tables_failed", err=str(e))
+# ----- startup events -----
+
+# ----------- Passive ingestion -----------
 class DossierEvent(BaseModel):
     user_id: str
     source_product: str   # "BRidge", "Vayudeck", etc.
@@ -757,304 +1776,6 @@ def ui_admin(request: Request):
     return _serve_html("admin.html")
 # --------- Server-side role-gated UI routes (belt & suspenders) ---------
 
-# --- Sales UI pages ---
-@app.get("/apply/sales", tags=["UI"], summary="Public sales rep application page")
-def ui_sales_apply():
-    return _serve_html("sales-apply.html")
-
-@app.get("/dashboard/sales", tags=["UI"], summary="Sales rep portal (role-gated)")
-def ui_sales_portal(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep", "admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_html("sales-portal.html")
-
-class SalesApplyIn(BaseModel):
-    legal_name: str = Field(min_length=1)
-    email: str = Field(min_length=3)
-    phone: Optional[str] = None
-
-@app.post("/sales/apply", tags=["Sales"], summary="Sales rep applies (public)")
-def sales_apply(payload: SalesApplyIn):
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        # normalize
-        email = payload.email.lower().strip()
-
-        # already exists?
-        existing = conn.execute("SELECT id, referral_code, status FROM sales_reps WHERE email=%s", (email,)).fetchone()
-        if existing:
-            return {"ok": True, "already_exists": True, "status": existing["status"], "referral_code": existing["referral_code"]}
-
-        rep_id = str(uuid.uuid4())
-        code = _new_ref_code()
-
-        row = conn.execute("""
-            INSERT INTO sales_reps (id, status, legal_name, email, phone, referral_code)
-            VALUES (%s,'candidate',%s,%s,%s,%s)
-            RETURNING id, status, legal_name, email, phone, referral_code, created_at
-        """, (rep_id, payload.legal_name, email, payload.phone, code)).fetchone()
-
-        # optional: log it into hr_records for audit trail
-        conn.execute(
-            "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-            (None, "sales_rep_applied", json.dumps({"rep_id": rep_id, "email": email}))
-        )
-
-    return {"ok": True, "rep": row}
-
-class SalesApproveIn(BaseModel):
-    temp_password: str = Field(min_length=8)
-
-def _bcrypt_hash(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-
-@app.post("/admin/sales/reps/{rep_id}/approve", tags=["Admin","Sales"], summary="Approve rep + create login user")
-def approve_sales_rep(rep_id: str, payload: SalesApproveIn, request: Request):
-    require_admin(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        rep = conn.execute("SELECT id, email, status FROM sales_reps WHERE id=%s", (rep_id,)).fetchone()
-        if not rep:
-            raise HTTPException(404, "rep not found")
-
-        # ensure role exists
-        role = conn.execute("SELECT id FROM roles WHERE name='sales_rep'").fetchone()
-        if not role:
-            role_id = str(uuid.uuid4())
-            conn.execute("INSERT INTO roles (id, name) VALUES (%s,'sales_rep')", (role_id,))
-        else:
-            role_id = role["id"]
-
-        # create hr_user login (or update if exists)
-        pw_hash = _bcrypt_hash(payload.temp_password)
-
-        existing_user = conn.execute("SELECT id FROM hr_users WHERE email=%s", (rep["email"],)).fetchone()
-        if existing_user:
-            conn.execute("""
-                UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE
-                WHERE email=%s
-            """, (pw_hash, role_id, rep["email"]))
-        else:
-            conn.execute("""
-                INSERT INTO hr_users (id, email, password_hash, role_id, is_active)
-                VALUES (%s,%s,%s,%s,TRUE)
-            """, (str(uuid.uuid4()), rep["email"], pw_hash, role_id))
-
-        # activate rep
-        conn.execute("UPDATE sales_reps SET status='active', updated_at=NOW() WHERE id=%s", (rep_id,))
-
-    return {"ok": True, "rep_id": rep_id, "status": "active"}
-
-def require_sales_rep(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep", "admin"):
-        raise HTTPException(403, "Sales rep only")
-    email = (request.session.get("user") or "").lower().strip()
-    if not email:
-        raise HTTPException(401, "Not logged in")
-
-    with db() as conn:
-        ensure_sales_tables(conn)
-        rep = conn.execute("SELECT * FROM sales_reps WHERE email=%s", (email,)).fetchone()
-        if not rep:
-            raise HTTPException(403, "No sales rep record for this user")
-        return rep
-
-LEAD_STAGES = ("new", "contacted", "demo", "sent_invoice", "closed_won", "closed_lost")
-
-class LeadCreateIn(BaseModel):
-    company_name: str = Field(min_length=1)
-    contact_name: Optional[str] = None
-    contact_email: Optional[str] = None
-    contact_phone: Optional[str] = None
-    website: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    notes: Optional[str] = None
-
-class LeadStagePatch(BaseModel):
-    stage: str = Field(pattern="^(new|contacted|demo|sent_invoice|closed_won|closed_lost)$")
-    notes: Optional[str] = None
-
-class LeadActivityIn(BaseModel):
-    activity_type: str = Field(pattern="^(call|email|demo|note|text|other)$")
-    notes: Optional[str] = None
-
-
-@app.post("/sales/leads", tags=["Sales"], summary="Create a lead (sales rep)")
-def create_lead(payload: LeadCreateIn, request: Request):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
-        lead_id = str(uuid.uuid4())
-        row = conn.execute("""
-            INSERT INTO sales_leads (
-              id, rep_id, company_name, contact_name, contact_email, contact_phone,
-              website, city, state, stage, notes, protection_expires_at
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,(NOW() + INTERVAL '14 days'))
-            RETURNING *
-        """, (
-            lead_id, rep["id"],
-            payload.company_name,
-            payload.contact_name,
-            payload.contact_email,
-            payload.contact_phone,
-            payload.website,
-            payload.city,
-            payload.state,
-            payload.notes
-        )).fetchone()
-
-        # audit trail (optional but very "Dossier")
-        conn.execute(
-            "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-            (None, "sales_lead_created", json.dumps({"lead_id": lead_id, "rep_id": str(rep["id"]), "company_name": payload.company_name}))
-        )
-    return {"ok": True, "lead": row}
-
-
-@app.get("/sales/leads", tags=["Sales"], summary="List my leads (sales rep)")
-def list_my_leads(
-    request: Request,
-    stage: Optional[str] = Query(None, description="Filter by stage"),
-    q: Optional[str] = Query(None, description="Search company/contact/email"),
-    limit: int = Query(200, ge=1, le=2000),
-    offset: int = Query(0, ge=0),
-):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        sql = """
-            SELECT *
-            FROM sales_leads
-            WHERE rep_id=%s
-        """
-        vals = [rep["id"]]
-
-        if stage:
-            sql += " AND stage=%s"
-            vals.append(stage)
-
-        if q:
-            sql += " AND (company_name ILIKE %s OR COALESCE(contact_name,'') ILIKE %s OR COALESCE(contact_email,'') ILIKE %s)"
-            vals.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
-
-        sql += " ORDER BY updated_at DESC, created_at DESC LIMIT %s OFFSET %s"
-        vals.extend([limit, offset])
-
-        rows = conn.execute(sql, tuple(vals)).fetchall()
-
-    return {"ok": True, "leads": rows}
-
-
-@app.patch("/sales/leads/{lead_id}", tags=["Sales"], summary="Update lead stage/notes (sales rep)")
-def patch_lead(lead_id: str, patch: LeadStagePatch, request: Request):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
-        if not lead:
-            raise HTTPException(404, "Lead not found")
-
-        row = conn.execute("""
-            UPDATE sales_leads
-            SET stage=%s,
-                notes=COALESCE(%s, notes),
-                updated_at=NOW()
-            WHERE id=%s AND rep_id=%s
-            RETURNING *
-        """, (patch.stage, patch.notes, lead_id, rep["id"])).fetchone()
-
-        conn.execute(
-            "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-            (None, "sales_lead_updated", json.dumps({"lead_id": lead_id, "rep_id": str(rep["id"]), "stage": patch.stage}))
-        )
-
-    return {"ok": True, "lead": row}
-
-
-@app.post("/sales/leads/{lead_id}/activity", tags=["Sales"], summary="Log lead activity (sales rep)")
-def add_lead_activity(lead_id: str, payload: LeadActivityIn, request: Request):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
-        if not lead:
-            raise HTTPException(404, "Lead not found")
-
-        act_id = str(uuid.uuid4())
-        row = conn.execute("""
-            INSERT INTO sales_lead_activities (id, lead_id, rep_id, activity_type, notes)
-            VALUES (%s,%s,%s,%s,%s)
-            RETURNING *
-        """, (act_id, lead_id, rep["id"], payload.activity_type, payload.notes)).fetchone()
-
-        # bump lead updated_at
-        conn.execute("UPDATE sales_leads SET updated_at=NOW() WHERE id=%s", (lead_id,))
-
-    return {"ok": True, "activity": row}
-
-
-@app.get("/sales/leads/{lead_id}/activity", tags=["Sales"], summary="List lead activity (sales rep)")
-def list_lead_activity(lead_id: str, request: Request, limit: int = Query(200, ge=1, le=2000)):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
-
-        lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
-        if not lead:
-            raise HTTPException(404, "Lead not found")
-
-        rows = conn.execute("""
-            SELECT *
-            FROM sales_lead_activities
-            WHERE lead_id=%s AND rep_id=%s
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (lead_id, rep["id"], limit)).fetchall()
-
-    return {"ok": True, "activities": rows}
-
-@app.get("/sales/me", tags=["Sales"], summary="Current sales rep profile")
-def sales_me(request: Request):
-    rep = require_sales_rep(request)
-    return {"ok": True, "rep": rep}
-
-@app.get("/sales/accounts", tags=["Sales"], summary="Accounts owned by current rep")
-def sales_accounts(request: Request, limit: int = Query(200, ge=1, le=2000)):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        rows = conn.execute("""
-            SELECT a.bridge_account_id, a.company_name, a.plan_tier, a.status, a.first_paid_at,
-                   o.ownership_start, o.ownership_reason
-            FROM account_ownership o
-            JOIN sales_accounts a ON a.bridge_account_id = o.bridge_account_id
-            WHERE o.sales_owner_rep_id=%s AND o.ownership_end IS NULL AND o.house_account=FALSE
-            ORDER BY COALESCE(a.first_paid_at, o.ownership_start) DESC
-            LIMIT %s
-        """, (rep["id"], limit)).fetchall()
-    return {"ok": True, "accounts": rows}
-
-@app.get("/sales/ledger", tags=["Sales"], summary="Commission ledger for current rep")
-def sales_ledger(request: Request, limit: int = Query(500, ge=1, le=5000)):
-    rep = require_sales_rep(request)
-    with db() as conn:
-        rows = conn.execute("""
-            SELECT bridge_account_id, line_type, amount_cents, vesting_status, scheduled_earn_date, created_at
-            FROM commission_ledger
-            WHERE rep_id=%s
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (rep["id"], limit)).fetchall()
-    return {"ok": True, "ledger": rows}
-# --- Sales UI pages ---
 
 # ---------- Bulk upsert companies (+ optional seeds) ----------
 class SeedIn(BaseModel):

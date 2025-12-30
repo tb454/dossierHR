@@ -3,68 +3,41 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>BRidge — Sales Portal</title>
+  <title>BRidge Sales — Portal</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="/static/sales-portal.js" defer></script>
+  <script type="module" src="/static/sales-portal.js" defer></script>
 </head>
 <body class="bg-zinc-50 text-zinc-900">
   <div class="max-w-6xl mx-auto p-6">
-    <div class="flex items-start justify-between gap-4">
+    <div class="flex items-center justify-between">
       <div>
         <h1 class="text-2xl font-bold">Sales Portal</h1>
-        <div id="repMeta" class="text-sm text-zinc-600 mt-1"></div>
+        <div id="meta" class="text-sm text-zinc-600 mt-1"></div>
       </div>
-      <a href="/static/login.html" class="text-sm underline text-zinc-700">Login</a>
+      <div class="flex gap-3 text-sm">
+        <a class="underline" href="/sales/leads/ui">Leads</a>
+        <a class="underline" href="/sales/deals/ui">Deals</a>
+        <a class="underline" href="/sales/onboarding/ui">Onboarding</a>
+        <a class="underline" href="/sales/assets/ui">Assets</a>
+        <a class="underline" href="/static/login.html">Login</a>
+      </div>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-6">
+      <div class="bg-white border rounded-xl p-4"><div class="text-sm text-zinc-500">Leads due</div><div id="leadsDue" class="text-2xl font-bold">—</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-sm text-zinc-500">Tasks due</div><div id="tasksDue" class="text-2xl font-bold">—</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-sm text-zinc-500">Onboarding red</div><div id="onboardingRed" class="text-2xl font-bold">—</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-sm text-zinc-500">Pending commission</div><div id="pendingComm" class="text-2xl font-bold">—</div></div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-6">
       <div class="bg-white border rounded-xl p-4">
-        <div class="font-semibold">Leads</div>
-
-        <form id="leadForm" class="mt-3 grid grid-cols-1 gap-2">
-          <input name="company_name" required class="border rounded-lg p-2 text-sm" placeholder="Company name"/>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <input name="contact_name" class="border rounded-lg p-2 text-sm" placeholder="Contact name"/>
-            <input name="contact_email" class="border rounded-lg p-2 text-sm" placeholder="Contact email"/>
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <input name="contact_phone" class="border rounded-lg p-2 text-sm" placeholder="Contact phone"/>
-            <input name="website" class="border rounded-lg p-2 text-sm" placeholder="Website"/>
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <input name="city" class="border rounded-lg p-2 text-sm" placeholder="City"/>
-            <input name="state" class="border rounded-lg p-2 text-sm" placeholder="State"/>
-          </div>
-          <textarea name="notes" class="border rounded-lg p-2 text-sm" rows="2" placeholder="Notes"></textarea>
-
-          <button class="bg-black text-white rounded-lg p-2 text-sm font-medium">Add Lead</button>
-          <div id="leadResult" class="text-xs text-zinc-600"></div>
-        </form>
-
-        <div class="mt-4 flex items-center gap-2">
-          <input id="leadSearch" class="border rounded-lg p-2 text-sm w-full" placeholder="Search leads..."/>
-          <select id="leadStage" class="border rounded-lg p-2 text-sm">
-            <option value="">All</option>
-            <option value="new">New</option>
-            <option value="contacted">Contacted</option>
-            <option value="demo">Demo</option>
-            <option value="sent_invoice">Sent invoice</option>
-            <option value="closed_won">Closed won</option>
-            <option value="closed_lost">Closed lost</option>
-          </select>
-        </div>
-
-        <div id="leads" class="mt-3 text-sm text-zinc-600">Loading...</div>
+        <div class="font-semibold">Pipeline by stage</div>
+        <div id="pipeline" class="text-sm text-zinc-600 mt-3">Loading...</div>
       </div>
-
       <div class="bg-white border rounded-xl p-4">
-        <div class="font-semibold">Owned Accounts</div>
-        <div id="accounts" class="mt-3 text-sm text-zinc-600">Loading...</div>
-      </div>
-
-      <div class="bg-white border rounded-xl p-4">
-        <div class="font-semibold">Commission Ledger</div>
-        <div id="ledger" class="mt-3 text-sm text-zinc-600">Loading...</div>
+        <div class="font-semibold">Tasks due today</div>
+        <div id="tasks" class="text-sm text-zinc-600 mt-3">Loading...</div>
       </div>
     </div>
   </div>

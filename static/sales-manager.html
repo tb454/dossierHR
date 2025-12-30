@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BRidge Sales — Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module" src="/static/sales-manager.js" defer></script>
+</head>
+<body class="bg-zinc-50 text-zinc-900">
+  <div class="max-w-4xl mx-auto p-6">
+    <div class="flex items-center justify-between">
+      <h1 class="text-2xl font-bold">Sales Manager</h1>
+      <div class="flex gap-3 text-sm">
+        <a class="underline" href="/sales/admin/ui">Admin</a>
+        <a class="underline" href="/dashboard/sales">Portal</a>
+      </div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="font-semibold">Team Pipeline</div>
+      <div id="pipe" class="text-sm text-zinc-600 mt-3">Loading...</div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="font-semibold">Onboarding</div>
+      <div id="onb" class="text-sm text-zinc-600 mt-3">Loading...</div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="font-semibold">Commission liability (pending)</div>
+      <div id="comm" class="text-sm text-zinc-600 mt-3">Loading...</div>
+    </div>
+  </div>
+</body>
+</html>

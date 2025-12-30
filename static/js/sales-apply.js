@@ -1,39 +1,22 @@
-async function postJSON(url, data) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-    credentials: "include",
-  });
-  const txt = await res.text();
-  let json;
-  try { json = JSON.parse(txt); } catch { json = { raw: txt }; }
-  if (!res.ok) throw new Error(json.detail || txt || "Request failed");
-  return json;
-}
+import { reqJSON, esc } from "./sales-common.js";
 
 document.addEventListener("DOMContentLoaded", () => {
-  const form = document.getElementById("applyForm");
-  const result = document.getElementById("result");
+  const f = document.getElementById("f");
+  const out = document.getElementById("out");
 
-  form.addEventListener("submit", async (e) => {
+  f.addEventListener("submit", async (e) => {
     e.preventDefault();
-    result.textContent = "Submitting...";
-    result.className = "mt-4 text-sm text-zinc-600";
-
-    const data = Object.fromEntries(new FormData(form).entries());
-
+    out.textContent = "Submitting...";
     try {
-      const out = await postJSON("/sales/apply", data);
-      const rep = out.rep || {};
-      result.className = "mt-4 text-sm text-green-700";
-      result.innerHTML =
-        `✅ Submitted. Status: <b>${rep.status || out.status || "candidate"}</b><br/>` +
-        `Your referral code: <b>${rep.referral_code || out.referral_code || ""}</b><br/>` +
-        `If you already applied, this will show your existing code.`;
+      const data = Object.fromEntries(new FormData(f).entries());
+      const r = await reqJSON("/sales/apply", { method: "POST", body: JSON.stringify(data) });
+      if (r.already_exists) {
+        out.innerHTML = `✅ Already applied. Status: <b>${esc(r.status)}</b> • Code: <b>${esc(r.referral_code)}</b>`;
+      } else {
+        out.innerHTML = `✅ Submitted. Status: <b>${esc(r.rep.status)}</b> • Code: <b>${esc(r.rep.referral_code)}</b>`;
+      }
     } catch (err) {
-      result.className = "mt-4 text-sm text-red-700";
-      result.textContent = "❌ " + (err.message || "Error");
+      out.textContent = "❌ " + (err.message || "Error");
     }
   });
 });
