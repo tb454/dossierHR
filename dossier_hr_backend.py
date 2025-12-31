@@ -1566,7 +1566,7 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if ENV!="production" else ["https://dossierdating.com","https://atlasipholdingsllc.com"],
+    allow_origins=["*"] if ENV!="production" else ["https://dossierdating.com","https://atlasipholdingsllc.com","https://dossierhr.onrender.com","https://hr.dossierdating.com"],
     allow_credentials=True,
     allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allow_headers=["*"],
