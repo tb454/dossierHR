@@ -1,4 +1,4 @@
-// /static/auth.js
+// /static/js/auth.js
 
 async function fetchJSON(url, opts = {}) {
   const res = await fetch(url, {
