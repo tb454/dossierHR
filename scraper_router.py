@@ -19,6 +19,7 @@ import random
 
 # Initialize FastAPI router and admin dependency early (before first usage)
 router = APIRouter(prefix="/scraper", tags=["Scraper"])
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ---- Admin dependency (imported from main file in-wire, see patch step) ----
 def require_admin_dep(req: Request):
@@ -111,7 +112,6 @@ def run_scheduler(batch: int = 500):
                     continue
 
                 # enqueue same-scope discoveries
-                from .scraper_router import _within_scope  # if same file, remove this import
                 for link in (rec.get("links_sample") or []):
                     if _within_scope(r["url"], link, r["scope"]):
                         pu = urlparse(link)
@@ -125,11 +125,6 @@ def run_scheduler(batch: int = 500):
                         enqueued += 1
 
     return {"ok": True, "crawled": crawled, "enqueued": enqueued, "shard": JOB_SHARD}
-
-# We'll use the same env DATABASE_URL as your app
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-router = APIRouter(prefix="/scraper", tags=["Scraper"])
 
 def db():
     if not DATABASE_URL:

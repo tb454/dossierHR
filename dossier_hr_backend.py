@@ -91,6 +91,10 @@ app = FastAPI(
 )
 app.include_router(scraper_router)
 
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/static/login.html", status_code=302)
+
 # ----- BRidge Sales  -----
 def ensure_sales_tables(conn):
     conn.execute("""
