@@ -85,12 +85,5 @@ async function logout() {
   location.href = '/static/login.html';
 }
 
-// If you're already logged in and you hit the login page, bounce to your dashboard.
-(async function autoBounceFromLogin(){
-  if (!onLoginPage()) return;
-  const who = await getMe();
-  if (who && who.role) gotoDashboard(who.role);
-})();
-
 // Export to window for inline handlers if you want:
 window.Auth = { getMe, requireRole, login, logout };
