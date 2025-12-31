@@ -91,7 +91,7 @@ app = FastAPI(
 )
 app.include_router(scraper_router)
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def root():
     return RedirectResponse("/static/login.html", status_code=302)
 
@@ -480,7 +480,7 @@ def require_sales_manager(request: Request):
 # UI routes (serve static pages, CSP-safe)
 # --------------------------
 def _serve_sales_html(filename: str) -> HTMLResponse:
-    p = Path("static") / filename
+    p = STATIC_DIR / filename
     if not p.exists():
         raise HTTPException(404, "Page not found")
     return HTMLResponse(p.read_text(encoding="utf-8"))
@@ -1541,8 +1541,10 @@ def admin_dashboard_sales(request: Request):
 
 # ------ App --------
 # Serve /static/* (HTML/JS/JSON)
-app.mount("/static", StaticFiles(directory="static", html=True), name="static")
-STATIC_DIR = Path("static")
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
 # Security headers (CSP, frame, etc.)
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
