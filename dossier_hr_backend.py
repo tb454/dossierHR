@@ -144,22 +144,24 @@ def ensure_sales_tables(conn):
 
     -- companies/accounts
     CREATE TABLE IF NOT EXISTS sales_companies (
-      id UUID PRIMARY KEY,
-      name TEXT NOT NULL,
-      domain TEXT NULL,
-      website TEXT NULL,
-      city TEXT NULL,
-      state TEXT NULL,
-      country TEXT NULL DEFAULT 'US',
-      company_type TEXT NOT NULL DEFAULT 'yard', -- yard/mill/manufacturer/broker/other
-      notes TEXT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE (name, COALESCE(domain,''))
-    );
+        id UUID PRIMARY KEY,
+        name TEXT NOT NULL,
+        domain TEXT NULL,
+        website TEXT NULL,
+        city TEXT NULL,
+        state TEXT NULL,
+        country TEXT NULL DEFAULT 'US',
+        company_type TEXT NOT NULL DEFAULT 'yard',
+        notes TEXT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
 
-    CREATE INDEX IF NOT EXISTS idx_sales_companies_domain ON sales_companies(domain);
-    CREATE INDEX IF NOT EXISTS idx_sales_companies_type ON sales_companies(company_type);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_sales_companies_name_domain
+        ON sales_companies (lower(name), coalesce(domain,''));
+
+        CREATE INDEX IF NOT EXISTS idx_sales_companies_domain ON sales_companies(domain);
+        CREATE INDEX IF NOT EXISTS idx_sales_companies_type ON sales_companies(company_type);
 
     -- contacts
     CREATE TABLE IF NOT EXISTS sales_contacts (
@@ -1186,7 +1188,7 @@ def _compute_checklist_status(steps) -> str:
     return "yellow"
 
 @app.post("/sales/onboarding/create", tags=["Sales"], summary="Create onboarding checklist for company")
-def create_onboarding(company_id: str, deal_id: Optional[str]=None, request: Request = None):
+def create_onboarding(request: Request, company_id: str, deal_id: Optional[str]=None):
     rep = require_sales_rep(request)
     with db() as conn:
         ensure_sales_tables(conn)
@@ -1574,6 +1576,7 @@ app.add_middleware(
 
 # Rate limit
 limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -1602,7 +1605,8 @@ def _startup_sales_tables():
             ensure_sales_tables(conn)
             _ensure_plan_row(conn)
     except Exception as e:
-        # don't crash boot in dev if DB is unavailable
+        if ENV == "production":
+            raise
         log.warning("sales_startup_tables_failed", err=str(e))
 # ----- startup events -----
 
