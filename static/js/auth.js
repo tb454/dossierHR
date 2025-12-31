@@ -20,9 +20,15 @@ async function fetchJSON(url, opts = {}) {
 }
 
 function gotoDashboard(role) {
-  if (role === 'admin') location.href = '/static/admin.html';
-  else if (role === 'manager') location.href = '/static/manager.html';
-  else location.href = '/static/employee.html';
+  if (role === 'admin') {
+    location.href = '/static/admin.html';
+  } else if (role === 'manager') {
+    location.href = '/static/manager.html';
+  } else if (role === 'sales_manager' || role === 'sales-manager' || role === 'salesmanager') {
+    location.href = '/static/sales-manager.html';
+  } else {
+    location.href = '/static/employee.html';
+  }
 }
 
 function onLoginPage() {
@@ -78,6 +84,13 @@ async function logout() {
   try { await fetchJSON('/logout', { method: 'POST' }); } catch (_) {}
   location.href = '/static/login.html';
 }
+
+// If you're already logged in and you hit the login page, bounce to your dashboard.
+(async function autoBounceFromLogin(){
+  if (!onLoginPage()) return;
+  const who = await getMe();
+  if (who && who.role) gotoDashboard(who.role);
+})();
 
 // Export to window for inline handlers if you want:
 window.Auth = { getMe, requireRole, login, logout };
