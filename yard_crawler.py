@@ -205,22 +205,51 @@ def parse_company(doc:HTMLParser, url:str)->Dict:
     emails = extract_emails(text)
     phones = extract_phones(text)
 
-    # social links
+    # links: socials + mailto + tel
     socials = {}
+    mailto_emails: Set[str] = set()
+
     for a in doc.css("a[href]"):
         href = a.attributes.get("href")
 
-        # Selectolax can return None for href; also ignore empty/non-string values
         if not href or not isinstance(href, str):
             continue
-
         href = href.strip()
         if not href:
             continue
 
+        low = href.lower()
+
+        # mailto capture
+        if low.startswith("mailto:"):
+            e = href.split(":", 1)[1].split("?", 1)[0].strip().lower()
+            if e and "@" in e:
+                mailto_emails.add(e)
+            continue
+
+        # tel capture
+        if low.startswith("tel:"):
+            tel = href.split(":", 1)[1].split("?", 1)[0].strip()
+            tel = re.sub(r"[^\d\+]", "", tel)
+            if tel:
+                try:
+                    n = phonenumbers.parse(tel, "US")
+                    phones.append(phonenumbers.format_number(n, phonenumbers.PhoneNumberFormat.E164))
+                except Exception:
+                    pass
+            continue
+
+        # socials
         for dom, label in SOC_KWS.items():
             if dom in href:
                 socials[label] = href
+
+    # merge mailto emails into extracted emails
+    if mailto_emails:
+        emails = sorted(set(emails) | set(mailto_emails))
+
+    # normalize phones after tel: additions
+    phones = sorted(set(phones))
 
     # schema.org
     data = extract_schema(doc.html or "", url)
@@ -368,6 +397,11 @@ async def crawl_site(client:httpx.AsyncClient, name:str, root:str)->Dict:
     result["contacts"]["phones"] = sorted(set(result["contacts"]["phones"]))
     result["company"]["names"] = sorted(set(result["company"]["names"]))
     result["company"]["hours"] = sorted(set(result["company"]["hours"]))
+    uniq = {}
+    for a in result["company"]["addresses"]:
+        key = "|".join([str(a.get("street") or ""), str(a.get("city") or ""), str(a.get("region") or ""), str(a.get("postal") or "")]).lower()
+        uniq[key] = a
+    result["company"]["addresses"] = list(uniq.values())
     result["region"] = region_from_company(name, [ {"addresses":result["company"]["addresses"]} ]) or "?"
 
     return result
