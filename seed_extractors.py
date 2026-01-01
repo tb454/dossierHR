@@ -64,7 +64,7 @@ async def fetch(client, url):
         # small pacing/jitter so DDG + directories don't ban you
         await asyncio.sleep(SLEEP)
         r = await client.get(url, timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=True)
-        if r.status_code != 200:
+        if r.status_code < 200 or r.status_code >= 300:
             return ""
         ct = (r.headers.get("content-type", "") or "").lower()
         if "text/html" not in ct:
@@ -386,7 +386,7 @@ async def scrape_rema_members(client) -> List[Dict]:
 # ---------- NEW adapter 1: Open-web search seeder ----------
 # We’ll use DuckDuckGo’s HTML endpoint (lightweight & TOS-friendly scraping) to pull result links.
 # Queries look like:  site:.com "scrap metal" (AL|Alabama) contact
-DDG_HTML = "https://duckduckgo.com/html/"
+DDG_HTML = "https://html.duckduckgo.com/html/"
 
 SEARCH_TERMS = [
     # core
@@ -458,7 +458,14 @@ async def ddg_search(client, query: str, max_pages: int = 2) -> List[str]:
 
         doc = HTMLParser(html)
 
-        for a in doc.css("a.result__a"):
+        # Primary selector (classic DDG HTML)
+        anchors = doc.css("a.result__a")
+
+        # Fallback selectors (DDG HTML changes)
+        if not anchors:
+            anchors = doc.css("div.result a[href]")
+
+        for a in anchors:
             href = (a.attributes.get("href", "") or "").strip()
             if not href:
                 continue
@@ -467,8 +474,8 @@ async def ddg_search(client, query: str, max_pages: int = 2) -> List[str]:
             if href.startswith("/"):
                 href = urljoin("https://duckduckgo.com", href)
 
-            # Handle DDG redirect wrapper
-            if "duckduckgo.com/l/" in href:
+            # Handle DDG redirect wrapper (absolute or relative)
+            if "/l/?" in href or "duckduckgo.com/l/" in href:
                 try:
                     q = urlparse(href).query
                     uddg = parse_qs(q).get("uddg", [""])[0]
@@ -481,7 +488,6 @@ async def ddg_search(client, query: str, max_pages: int = 2) -> List[str]:
             if not href.startswith("http"):
                 continue
 
-            # De-dupe exact URLs
             if href in seen:
                 continue
             seen.add(href)
@@ -650,9 +656,12 @@ async def build_master_seeds(extra_csv=None, out_csv="seeds_all.csv", states_fil
             tasks.append(scrape_state_lists(client, states))
         batches = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for b in batches:
-            if isinstance(b, Exception): 
+        # Debug: show which batch is dead
+        for i, b in enumerate(batches):
+            if isinstance(b, Exception):
+                print(f"[seed task {i}] ERROR: {type(b).__name__}: {b}")
                 raise b
+            print(f"[seed task {i}] rows={len(b)}")
             rows.extend(b)
 
     # merge with any existing seeds you have
