@@ -6,7 +6,7 @@ from selectolax.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, urlencode
 
 UA = "DossierSeeder/1.1 (+contact: sales@yourdomain.tld)"
-TIMEOUT = 20
+TIMEOUT = float(os.getenv("SEED_TIMEOUT", "12"))
 CONC = 10
 
 SLEEP = float(os.getenv("SEED_SLEEP", "0.2"))         # request pacing (avoid DDG bans)
