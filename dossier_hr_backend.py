@@ -1819,7 +1819,22 @@ def admin_link_hr_user(payload: LinkUserIn, request: Request):
             "UPDATE hr_users SET profile_id=COALESCE(%s, profile_id), sales_rep_id=COALESCE(%s, sales_rep_id) WHERE email=%s",
             (payload.profile_id, payload.sales_rep_id, email)
         )
+    
+    # If you're linking the currently logged-in user, refresh session claims
+    if (request.session.get("user") or "").lower().strip() == email:
+        with db() as conn:
+            fresh = conn.execute(
+                "SELECT id, email, sales_rep_id, profile_id "
+                "FROM hr_users WHERE email=%s",
+                (email,)
+            ).fetchone()
+        if fresh:
+            request.session["hr_user_id"] = str(fresh["id"])
+            request.session["sales_rep_id"] = str(fresh["sales_rep_id"]) if fresh.get("sales_rep_id") else None
+            request.session["profile_id"] = str(fresh["profile_id"]) if fresh.get("profile_id") else None
+
     return {"ok": True}
+
 # ------ Auth --------------
 
 # ------- Server-side role-gated UI routes (belt & suspenders) -------

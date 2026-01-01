@@ -25,8 +25,7 @@ function gotoDashboard(role) {
   } else if (role === 'manager') {
     location.href = '/dashboard/manager';
   } else if (role === 'sales_manager' || role === 'sales-manager' || role === 'salesmanager') {
-    // you already have this route role-gated server-side
-    location.href = '/sales/manager/ui';
+    location.href = '/dashboard/sales-manager';
   } else {
     location.href = '/dashboard/employee';
   }
