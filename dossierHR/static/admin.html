@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Admin | Dossier HR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="/static/js/auth.js"></script>
+  <script defer src="/static/js/viewer.js"></script>
+</head>
+<body class="min-h-screen bg-gray-50">
+  <header class="bg-white shadow p-4 flex items-center justify-between">
+    <h1 class="text-xl font-semibold">Admin Dashboard</h1>
+    <div class="flex items-center space-x-3">
+      <a href="/static/manager.html" class="text-sm text-blue-600 hover:underline">Manager View</a>
+      <a href="/static/employee.html" class="text-sm text-blue-600 hover:underline">My View</a>
+      <span id="whoami" class="text-sm text-gray-600"></span>
+      <button id="logoutBtn" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300">Logout</button>
+    </div>
+  </header>
+
+  <main class="p-4">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-semibold mb-2">Recent Profiles (proof)</h2>
+        <div id="profiles-box" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+      </div>
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-semibold mb-2">Reviews by Day (last 14)</h2>
+        <div id="reviews-by-day" class="space-y-1 text-sm"></div>
+        <div class="mt-4">
+          <button id="run-dump" class="px-3 py-1 bg-blue-600 text-white rounded">Run Nightly Dump</button>
+          <div id="dump-out" class="mt-2 text-xs text-gray-600"></div>
+        </div>
+      </div>
+    </div>
+          <div class="bg-white rounded-xl shadow p-4">
+        <div class="flex items-center justify-between">
+          <h2 class="font-semibold">Live BRidge Events</h2>
+          <button id="refresh-ingest" class="px-2 py-1 text-sm bg-gray-100 rounded hover:bg-gray-200">Refresh</button>
+        </div>
+        <div id="ingest-list" class="mt-3 text-sm space-y-2"></div>
+      </div>
+
+  </main>
+
+  <script defer src="/static/js/admin.js"></script>
+</body>
+</html>

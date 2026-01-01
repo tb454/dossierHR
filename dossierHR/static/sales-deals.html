@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BRidge Sales — Deals</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module" src="/static/js/sales-deals.js" defer></script>
+</head>
+<body class="bg-zinc-50 text-zinc-900">
+  <div class="max-w-6xl mx-auto p-6">
+    <div class="flex items-center justify-between">
+      <h1 class="text-2xl font-bold">Deals</h1>
+      <div class="flex gap-3 text-sm">
+        <a class="underline" href="/dashboard/sales">Portal</a>
+        <a class="underline" href="/sales/leads/ui">Leads</a>
+        <a class="underline" href="/sales/onboarding/ui">Onboarding</a>
+      </div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="flex gap-2">
+        <input id="companySearch" class="border rounded-lg p-2 text-sm w-full" placeholder="Search company..." />
+        <button id="searchBtn" class="border rounded-lg px-3 py-2 text-sm">Search</button>
+      </div>
+      <div id="companies" class="text-sm text-zinc-600 mt-3"></div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="flex gap-2 items-center">
+        <input id="q" class="border rounded-lg p-2 text-sm w-full" placeholder="Search deals..." />
+        <select id="stage" class="border rounded-lg p-2 text-sm">
+          <option value="">All</option>
+          <option>new</option><option>contacted</option><option>qualified</option><option>demo_scheduled</option><option>demo_done</option><option>proposal</option><option>negotiation</option><option>closed_won</option><option>closed_lost</option>
+        </select>
+        <button id="refresh" class="border rounded-lg px-3 py-2 text-sm">Refresh</button>
+      </div>
+      <div id="list" class="text-sm text-zinc-600 mt-4">Loading...</div>
+    </div>
+  </div>
+</body>
+</html>

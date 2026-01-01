@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Employee | Dossier HR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- session + helpers -->
+  <script defer src="/static/js/auth.js"></script>
+  <script defer src="/static/js/viewer.js"></script>
+</head>
+<body class="min-h-screen bg-gray-50">
+  <header class="bg-white shadow p-4 flex items-center justify-between">
+    <h1 class="text-xl font-semibold">Employee Dashboard</h1>
+    <div class="flex items-center space-x-3">
+      <span id="whoami" class="text-sm text-gray-600"></span>
+      <button id="logoutBtn" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300">Logout</button>
+    </div>
+  </header>
+
+  <main class="p-4">
+    <div id="employee-proof" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+  </main>
+
+  <script defer src="/static/js/employee.js"></script>
+</body>
+</html>

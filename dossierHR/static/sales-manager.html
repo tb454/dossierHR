@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BRidge Sales — Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- session + helpers -->
+  <script defer src="/static/js/auth.js"></script>
+  <script defer src="/static/js/viewer.js"></script>
+
+  <script type="module" src="/static/js/sales-manager.js" defer></script>
+
+</head>
+<body class="bg-zinc-50 text-zinc-900">
+  <div class="max-w-4xl mx-auto p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-bold">Sales Manager</h1>
+        <div id="whoami" class="text-xs text-zinc-500 mt-1"></div>
+      </div>
+      <div class="flex items-center gap-3 text-sm">
+        <a class="underline" href="/sales/admin/ui">Admin</a>
+        <a class="underline" href="/dashboard/sales">Portal</a>
+        <button id="logoutBtn" class="px-3 py-1 rounded bg-zinc-200 hover:bg-zinc-300">Logout</button>
+      </div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="font-semibold">Team Pipeline</div>
+      <div id="pipe" class="text-sm text-zinc-600 mt-3">Loading...</div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="font-semibold">Onboarding</div>
+      <div id="onb" class="text-sm text-zinc-600 mt-3">Loading...</div>
+    </div>
+
+    <div class="bg-white border rounded-xl p-4 mt-6">
+      <div class="font-semibold">Commission liability (pending)</div>
+      <div id="comm" class="text-sm text-zinc-600 mt-3">Loading...</div>
+    </div>
+  </div>
+</body>
+</html>
