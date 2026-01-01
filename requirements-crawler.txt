@@ -1,0 +1,9 @@
+httpx[http2]==0.27.2
+tldextract==5.1.2
+selectolax==0.3.20
+extruct==0.16.0
+w3lib==2.2.1
+phonenumberslite==8.13.45
+rapidfuzz==3.9.7
+python-slugify==8.0.4
+lxml==5.1.0

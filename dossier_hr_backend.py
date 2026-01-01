@@ -22,6 +22,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from scraper_router import router as scraper_router
+from leads_ingest_router import router as leads_ingest_router
 from sales_leads_router import router as sales_leads_router
 from urllib.parse import urlparse
 
@@ -93,6 +94,7 @@ app = FastAPI(
 )
 app.include_router(scraper_router)
 app.include_router(sales_leads_router)
+app.include_router(leads_ingest_router)
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def root():
