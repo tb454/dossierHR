@@ -556,7 +556,7 @@ class SalesApproveIn(BaseModel):
 
 @app.post("/admin/sales/reps/{rep_id}/approve", tags=["Admin","Sales"], summary="Approve rep + create login user")
 def approve_sales_rep(rep_id: str, payload: SalesApproveIn, request: Request):
-    require_admin(request)
+    require_sales_admin(request)
     actor = _actor_email(request)
     with db() as conn:
         ensure_sales_tables(conn)
@@ -609,7 +609,7 @@ def _hash_invite_token(token: str) -> str:
 
 @app.post("/admin/sales/invite", tags=["Admin","Sales"], summary="Create invite link (admin)")
 def create_sales_invite(payload: InviteCreateIn, request: Request):
-    require_admin(request)
+    require_sales_admin(request)
     actor = _actor_email(request)
     with db() as conn:
         ensure_sales_tables(conn)
@@ -699,7 +699,7 @@ def accept_sales_invite(payload: InviteAcceptIn, request: Request):
 
 @app.get("/admin/sales/reps", tags=["Admin","Sales"], summary="List sales reps")
 def list_sales_reps(request: Request, status: Optional[str]=None, limit: int = Query(500, ge=1, le=5000)):
-    require_admin(request)
+    require_sales_admin(request)
     with db() as conn:
         ensure_sales_tables(conn)
         sql = "SELECT * FROM sales_reps WHERE 1=1"
@@ -1421,7 +1421,7 @@ class AssetUpsertIn(BaseModel):
 
 @app.post("/admin/sales/assets", tags=["Admin","Sales"], summary="Add/update asset (admin)")
 def upsert_asset(payload: AssetUpsertIn, request: Request):
-    require_admin(request)
+    require_sales_admin(request)
     with db() as conn:
         ensure_sales_tables(conn)
         existing = conn.execute("SELECT * FROM sales_assets WHERE name=%s AND asset_type=%s LIMIT 1", (payload.name, payload.asset_type)).fetchone()
@@ -1518,7 +1518,7 @@ def _month_index_from_first(conn, company_id: str, collected_at: datetime) -> in
 
 @app.post("/admin/sales/revenue/post", tags=["Admin","Sales"], summary="Manual revenue posting (admin)")
 def post_revenue(payload: RevenuePostIn, request: Request):
-    require_admin(request)
+    require_sales_admin(request)
     actor = _actor_email(request)
     with db() as conn:
         ensure_sales_tables(conn)
@@ -1570,7 +1570,7 @@ def post_revenue(payload: RevenuePostIn, request: Request):
 
 @app.get("/admin/sales/revenue", tags=["Admin","Sales"], summary="List revenue events (admin)")
 def list_revenue(request: Request, limit: int = Query(500, ge=1, le=5000)):
-    require_admin(request)
+    require_sales_admin(request)
     with db() as conn:
         ensure_sales_tables(conn)
         rows = conn.execute("""
@@ -1962,6 +1962,12 @@ def require_admin(req: Request):
         raise HTTPException(403, "Admin only")
     return True
 
+def require_sales_admin(req: Request):
+    role = (req.session.get("role") or "").strip().lower().replace("-", "_")
+    if role not in ("sales_admin", "admin"):
+        raise HTTPException(403, "Sales Admin only")
+    return True
+
 def require_manager_or_admin(req: Request):
     role = req.session.get("role")
     if role not in ("admin","manager"):
@@ -1973,8 +1979,6 @@ def redirect_for_role(r: str) -> str:
     
     if r == "admin":
         return "/static/admin.html"
-    if r == "sales_manager":
-        return "/static/sales-manager.html"
     if r == "sales_admin":
         return "/static/sales-admin.html"
     if r == "manager":

@@ -1,4 +1,4 @@
-// Employee: show session + a tiny message. (You can expand later.)
+// Employee.js
 (async function () {
   const who = await requireRole(['employee','manager','admin']);
   if (!who) return;
