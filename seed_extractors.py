@@ -9,6 +9,9 @@ UA = "DossierSeeder/1.1 (+contact: sales@yourdomain.tld)"
 TIMEOUT = 20
 CONC = 10
 
+SLEEP = float(os.getenv("SEED_SLEEP", "0.2"))         # request pacing (avoid DDG bans)
+MAX_SITES_PER_STATE = int(os.getenv("SEED_MAX_SITES_PER_STATE", "250"))  # cap DDG output per state
+
 STATE_TO_REGION = {
   "CA":"PAC","OR":"PAC","WA":"PAC","HI":"PAC","AK":"PAC",
   "AZ":"MTN","NV":"MTN","UT":"MTN","CO":"MTN","NM":"MTN","ID":"MTN","WY":"MTN","MT":"MTN",
@@ -52,9 +55,13 @@ def dedupe_by_host(rows:List[Dict]):
 
 async def fetch(client, url):
     try:
-        r = await client.get(url, timeout=TIMEOUT, headers={"User-Agent":UA}, follow_redirects=True)
-        if r.status_code != 200: return ""
-        if "text/html" not in r.headers.get("content-type",""):
+        # small pacing/jitter so DDG + directories don't ban you
+        await asyncio.sleep(SLEEP)
+        r = await client.get(url, timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=True)
+        if r.status_code != 200:
+            return ""
+        ct = (r.headers.get("content-type", "") or "").lower()
+        if "text/html" not in ct:
             return ""
         return r.text
     except Exception:
@@ -261,6 +268,8 @@ async def scrape_az_dps_stores(client) -> List[Dict]:
         seen.add(key)
         deduped.append((n, c))
 
+    deduped = deduped[:int(os.getenv("SEED_AZ_MAX", "250"))]
+
     sem = asyncio.Semaphore(int(os.getenv("SEED_AZ_RESOLVE_CONC", "8")))
     out: List[Dict] = []
 
@@ -280,83 +289,40 @@ async def scrape_az_dps_stores(client) -> List[Dict]:
 
 async def scrape_openweb_search(client, states:List[str])->List[Dict]:
     rows=[]
+    ddg_pages = int(os.getenv("SEED_DDG_PAGES", "2"))  # default DOWN from 5 to avoid bans
+
     for st in states:
-        tokens = STATE_TOKENS.get(st.upper(), [st])
+        st = st.upper()
+        st_count = 0
+        tokens = STATE_TOKENS.get(st, [st])
+
         for term in SEARCH_TERMS:
             for tok in tokens:
+                if st_count >= MAX_SITES_PER_STATE:
+                    break
+
                 q = f"{term} {tok}"
-                hits = await ddg_search(client, q, max_pages=int(os.getenv("SEED_DDG_PAGES","5")))
+                hits = await ddg_search(client, q, max_pages=ddg_pages)
+
                 for h in hits:
+                    if st_count >= MAX_SITES_PER_STATE:
+                        break
+
                     site = canon(h)
                     if not site or not likely_company_site(site):
                         continue
+
                     rows.append({
                         "Name": site.replace("https://",""),
                         "Website": site,
-                        "Region": STATE_TO_REGION.get(st.upper(), ""),
+                        "Region": STATE_TO_REGION.get(st, ""),
                         "Source": f"search:ddg:{st}:{tok}"
                     })
+                    st_count += 1
+
     return rows
 
-# ---------- NEW adapter 2: State list seeder ----------
-# Config of state-level pages that list scrap dealers / recyclers. This is a sampler; extend as you find more.
-STATE_LIST_PAGES: Dict[str, List[str]] = {
-  "AZ": ["https://www.azdps.gov/services/public/scrap-metal-dealers"],
-  "DE": ["https://dsp.delaware.gov/pawnbrokers-secondhand-dealers-scrap-metal-processors/"],
-  "GA": ["https://gbi.georgia.gov/services/secondary-metals-recycling"],
-  "KS": ["https://www.ag.ks.gov/divisions/civil/licensing-inspections/scrap-metal-dealers"],
-  "KY": ["https://metalrecycling.ky.gov/"],
-  "MN": ["https://dps.mn.gov/divisions/bca/bca-divisions/investigative-services/scrap-metal"],
-  "MS": ["https://www.sos.ms.gov/regulation-enforcement/scrap-metal"],
-  "ND": ["https://apps.attorneygeneral.nd.gov/scrap-metal"],
-  "OH": ["https://services.dps.ohio.gov/ScrapDealer/Home/FAQ"],
-  "TN": ["https://www.tn.gov/commerce/regboards/scrap.html"],
-  "WA": ["https://dor.wa.gov/manage-business/state-endorsements/scrap-metal"],
-  "WV": ["https://apps.sos.wv.gov/business/scrapmetaldealers/"],
-  "TX": ["https://www.tceq.texas.gov/permitting/waste_permits/recycling/scrap_metals.html"],
-  "FL": ["https://floridadep.gov/waste/waste-reduction/content/recycling-and-waste-reduction"],
-  "CA": ["https://calrecycle.ca.gov/homehazwaste/metal"],
-}
-
-def extract_external_sites_from_html(html: str, base: str) -> List[Dict]:
-    out = []
-    doc = HTMLParser(html)
-
-    base_host = urlparse(base).netloc.lower().split(":")[0]
-    if base_host.startswith("www."):
-        base_host = base_host[4:]
-
-    for a in doc.css("a[href]"):
-        h = (a.attributes.get("href", "") or "").strip()
-        if not h:
-            continue
-        if h.startswith(("mailto:", "tel:")):
-            continue
-        if any(h.lower().endswith(ext) for ext in (".pdf", ".doc", ".docx", ".xls", ".xlsx")):
-            continue
-
-        full = urljoin(base, h)
-        site = canon(full)
-        if not site:
-            continue
-
-        site_host = urlparse(site).netloc.lower().split(":")[0]
-        if site_host.startswith("www."):
-            site_host = site_host[4:]
-
-        # skip self domain
-        if site_host == base_host:
-            continue
-
-        # skip socials / aggregators
-        if not likely_company_site(site):
-            continue
-
-        name = clean_text(a.text()) or site.replace("https://", "")
-        out.append({"Name": name, "Website": site})
-
-    return out
-
+# ---------- Scrape ----------
 async def scrape_state_lists(client, states: List[str]) -> List[Dict]:
     rows = []
     for st in states:
