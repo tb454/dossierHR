@@ -511,7 +511,14 @@ def ui_sales_portal(request: Request):
     role = request.session.get("role")
     if role not in ("sales_rep","sales_manager","admin"):
         return RedirectResponse("/static/login.html", status_code=302)
+    
     return _serve_sales_html("sales-portal.html")
+@app.get("/dashboard/sales-manager", tags=["UI"], summary="Sales manager dashboard (role-gated)")
+def ui_sales_manager_dash(request: Request):
+    role = request.session.get("role")
+    if role not in ("sales_manager", "admin"):
+        return RedirectResponse("/static/login.html", status_code=302)
+    return _serve_sales_html("sales-manager.html")
 
 @app.get("/sales/leads/ui", tags=["UI"], summary="Leads UI")
 def ui_sales_leads(request: Request):
@@ -1792,6 +1799,27 @@ def me(request: Request):
 @app.get("/whoami", tags=["Auth"], summary="Alias of /me for frontend routing")
 def whoami(request: Request):
     return me(request)
+
+class LinkUserIn(BaseModel):
+    email: str
+    profile_id: Optional[str] = None
+    sales_rep_id: Optional[str] = None
+
+@app.post("/admin/hr_users/link", tags=["Admin"], summary="Link an hr_user to a profile_id and/or sales_rep_id")
+def admin_link_hr_user(payload: LinkUserIn, request: Request):
+    require_admin(request)
+    email = payload.email.lower().strip()
+
+    with db() as conn:
+        row = conn.execute("SELECT id FROM hr_users WHERE email=%s", (email,)).fetchone()
+        if not row:
+            raise HTTPException(404, "hr_user not found")
+
+        conn.execute(
+            "UPDATE hr_users SET profile_id=COALESCE(%s, profile_id), sales_rep_id=COALESCE(%s, sales_rep_id) WHERE email=%s",
+            (payload.profile_id, payload.sales_rep_id, email)
+        )
+    return {"ok": True}
 # ------ Auth --------------
 
 # ------- Server-side role-gated UI routes (belt & suspenders) -------

@@ -21,13 +21,14 @@ async function fetchJSON(url, opts = {}) {
 
 function gotoDashboard(role) {
   if (role === 'admin') {
-    location.href = '/static/admin.html';
+    location.href = '/dashboard/admin';
   } else if (role === 'manager') {
-    location.href = '/static/manager.html';
+    location.href = '/dashboard/manager';
   } else if (role === 'sales_manager' || role === 'sales-manager' || role === 'salesmanager') {
-    location.href = '/static/sales-manager.html';
+    // you already have this route role-gated server-side
+    location.href = '/sales/manager/ui';
   } else {
-    location.href = '/static/employee.html';
+    location.href = '/dashboard/employee';
   }
 }
 
