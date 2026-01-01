@@ -326,10 +326,42 @@ async def crawl_site(client:httpx.AsyncClient, name:str, root:str)->Dict:
         result["company"]["hours"] += parsed["hours"]
         result["company"]["geos"] += parsed["geos"]
 
-        # more internal targets (prefer contact-like)
+        # more internal targets (force root + best contact + best about early, but keep full 12-page budget)
         intern, _ = find_links(doc, url)
-        intern = [u for u in intern if score_contact_link(u)>0]
-        queue += list(dedupe(intern))
+
+        def is_contactish(u: str) -> bool:
+            t = u.lower()
+            return any(k in t for k in ("/contact", "contact-us", "/locations", "/location", "/yards", "/visit", "/hours"))
+
+        def is_aboutish(u: str) -> bool:
+            t = u.lower()
+            return any(k in t for k in ("/about", "about-us", "/company", "who-we-are", "/team", "/history"))
+
+        if url == root:
+            ranked = sorted(intern, key=lambda u: score_contact_link(u), reverse=True)
+
+            best_contact = next((u for u in ranked if is_contactish(u)), None)
+            best_about   = next((u for u in ranked if is_aboutish(u)), None)
+
+            # If not discovered as a link, fall back to conventional paths
+            if not best_contact:
+                best_contact = urljoin(root, "/contact")
+            if not best_about:
+                best_about = urljoin(root, "/about")
+
+            # Prepend them so they are crawled next (don’t duplicate if already queued/seen)
+            prepend = []
+            for u in (best_contact, best_about):
+                if u and (u not in seen) and (u not in queue) and is_same_site(root, u):
+                    prepend.append(u)
+            queue = prepend + queue
+
+        # Now keep filling the remaining budget with best-scoring internal links
+        remaining = MAX_PAGES_PER_SITE - len(result["pages"])
+        if remaining > 0:
+            ranked = sorted(intern, key=lambda u: score_contact_link(u), reverse=True)
+            ranked = [u for u in ranked if (u not in seen) and (u not in queue)]
+            queue += list(itertools.islice(ranked, 0, remaining))
 
     # finalize
     result["contacts"]["emails"] = sorted(set(result["contacts"]["emails"]))
@@ -384,9 +416,15 @@ def summarize_for_sales(rec:Dict)->Dict:
     names = rec["company"]["names"] or rec["also_known_as"]
     # key contact page
     contact_page = ""
+    # Prefer true contact/location pages over "about"
     for p in rec["pages"]:
-        if score_contact_link(p["url"])>0:
+        u = (p.get("url") or "").lower()
+        if any(k in u for k in ("/contact", "contact-us", "/locations", "/location", "/yards", "/visit", "/hours")):
             contact_page = p["url"]; break
+    if not contact_page:
+        for p in rec["pages"]:
+            if score_contact_link(p["url"]) > 0:
+                contact_page = p["url"]; break
     return {
         "host": rec.get("host"),
         "root": root,
