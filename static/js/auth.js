@@ -20,15 +20,34 @@ async function fetchJSON(url, opts = {}) {
 }
 
 function gotoDashboard(role) {
+  role = (role || '').toString().trim().toLowerCase().replaceAll('-', '_');
+
   if (role === 'admin') {
     location.href = '/dashboard/admin';
-  } else if (role === 'manager') {
-    location.href = '/dashboard/manager';
-  } else if (role === 'sales_manager' || role === 'sales-manager' || role === 'salesmanager') {
-    location.href = '/dashboard/sales-manager';
-  } else {
-    location.href = '/dashboard/employee';
+    return;
   }
+
+  if (role === 'manager') {
+    location.href = '/dashboard/manager';
+    return;
+  }
+
+  // Sales manager
+  if (role === 'sales_manager' || role === 'salesmanager') {
+    // You already serve sales-manager.html here
+    location.href = '/dashboard/sales-manager';
+    return;
+  }
+
+  // Sales rep (and SDR)
+  if (role === 'sales_rep' || role === 'salesrep' || role === 'sdr') {
+    // This is your sales portal page (sales-portal.html)
+    location.href = '/dashboard/sales';
+    return;
+  }
+
+  // Default HR employee
+  location.href = '/dashboard/employee';
 }
 
 function onLoginPage() {
@@ -39,9 +58,9 @@ function onLoginPage() {
 async function getMe() {
   try {
     const me = await fetchJSON('/me');
-    return me && typeof me === 'object' ? me : { ok: false };
+    if (!me || me.ok !== true || !me.role) return { ok: false };
+    return me;
   } catch (e) {
-    // Treat 401/403 as not logged in; rethrow other errors for visibility
     if (e && (e.status === 401 || e.status === 403)) return { ok: false };
     console.error('getMe failed:', e);
     return { ok: false };
@@ -76,7 +95,8 @@ async function login(email, password) {
     body: JSON.stringify({ email, password }),
   });
   // API returns {ok:true, role:'...'}
-  gotoDashboard(data.role);
+  if (data.redirect) location.href = data.redirect;
+  else gotoDashboard(data.role);
 }
 
 // Convenience: logout and go back to login

@@ -2078,13 +2078,29 @@ def login(payload: LoginIn, request: Request):
     request.session["sales_rep_id"] = str(row["sales_rep_id"]) if row.get("sales_rep_id") else None
     request.session["profile_id"] = str(row["profile_id"]) if row.get("profile_id") else None
 
+    role = row["role"]
+
+    def _redirect_for_role(r: str) -> str:
+        r = (r or "").strip().lower().replace("-", "_")
+        if r == "admin":
+            return "/dashboard/admin"
+        if r == "manager":
+            return "/dashboard/manager"
+        if r == "sales_manager":
+            return "/dashboard/sales-manager"
+        if r in ("sales_rep", "sdr"):
+            return "/dashboard/sales"
+        return "/dashboard/employee"
+
     return {
         "ok": True,
-        "role": row["role"],
+        "role": role,
+        "redirect": _redirect_for_role(role),
         "hr_user_id": request.session.get("hr_user_id"),
         "sales_rep_id": request.session.get("sales_rep_id"),
         "profile_id": request.session.get("profile_id"),
     }
+
 
 @app.post("/logout", tags=["Auth"], summary="Logout")
 def logout(request: Request):
@@ -2093,10 +2109,15 @@ def logout(request: Request):
 
 @app.get("/me", tags=["Auth"], summary="Return current session identity")
 def me(request: Request):
+    email = request.session.get("user")
+    role = request.session.get("role")
+    if not email or not role:
+        return {"ok": False}
+
     return {
         "ok": True,
-        "email": request.session.get("user"),
-        "role": request.session.get("role"),
+        "email": email,
+        "role": role,
         "hr_user_id": request.session.get("hr_user_id"),
         "sales_rep_id": request.session.get("sales_rep_id"),
         "profile_id": request.session.get("profile_id"),
