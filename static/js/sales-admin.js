@@ -1,6 +1,10 @@
 // static/js/sales-admin.js
 import { reqJSON, esc } from "./sales-common.js";
 
+// Gate page: allow sales_admin
+const who = await window.Auth.requireRole(["sales_admin"]);
+if (!who) throw new Error("Not authorized");
+
 async function loadReps() {
   const el = document.getElementById("reps");
   const out = await reqJSON("/admin/sales/reps?limit=50");

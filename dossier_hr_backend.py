@@ -1973,6 +1973,10 @@ def redirect_for_role(r: str) -> str:
     
     if r == "admin":
         return "/static/admin.html"
+    if r == "sales_manager":
+        return "/static/sales-manager.html"
+    if r == "sales_admin":
+        return "/static/sales-admin.html"
     if r == "manager":
         return "/static/manager.html"
     if r == "sales_manager":
@@ -1980,7 +1984,6 @@ def redirect_for_role(r: str) -> str:
     if r in ("sales_rep", "sdr"):
         return "/static/sales-portal.html"
     return "/static/employee.html"
-
 
 # -------- Health -----------
 @app.get("/health", tags=["System"], summary="Healthcheck")
