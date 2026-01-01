@@ -13,8 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from slowapi import Limiter
+from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import AnyUrl, BaseModel, Field
 import bcrypt
@@ -34,7 +36,18 @@ log = structlog.get_logger()
 
 ENV = os.getenv("ENV", "development")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev_secret_change_me")
+
+# ---- Session cookie HTTPS behavior (fixes "login then bounced back to login") ----
+# Set SESSION_HTTPS_ONLY=false for local HTTP dev.
+# Leave unset on Render (auto => true when ENV=production).
+_SESSION_HTTPS_ONLY_RAW = os.getenv("SESSION_HTTPS_ONLY", "auto").lower().strip()
+if _SESSION_HTTPS_ONLY_RAW == "auto":
+    SESSION_HTTPS_ONLY = (ENV == "production")
+else:
+    SESSION_HTTPS_ONLY = _SESSION_HTTPS_ONLY_RAW in ("1", "true", "yes")
+
 HOSTS = [h.strip() for h in os.getenv("HOSTS", "localhost,127.0.0.1").split(",")]
+
 DB_URL = os.getenv("DATABASE_URL")
 BRIDGE_SYNC_HMAC_SECRET = os.getenv("BRIDGE_SYNC_HMAC_SECRET", "dev_hmac")  # kept for backward compat if you ever need it
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET", "dev_ingest")
@@ -1699,7 +1712,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"] if ENV != "production" else HOSTS)
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=(ENV=="production"))
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    same_site="lax",
+    https_only=SESSION_HTTPS_ONLY,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1712,6 +1730,8 @@ app.add_middleware(
 # Rate limit
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
