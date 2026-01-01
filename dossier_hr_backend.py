@@ -1,3 +1,4 @@
+# dossier_hr_backend.py
 import os, uuid, json, hashlib, hmac, time
 from datetime import datetime
 from typing import Optional, List, Annotated
@@ -462,14 +463,26 @@ def require_sales_rep(request: Request):
     role = request.session.get("role")
     if role not in ("sales_rep", "sales_manager", "admin"):
         raise HTTPException(403, "Sales only")
+
     email = (request.session.get("user") or "").lower().strip()
     if not email:
         raise HTTPException(401, "Not logged in")
+
+    rep_id = request.session.get("sales_rep_id")
+
     with db() as conn:
         ensure_sales_tables(conn)
+
+        # If mapped, use the FK link (correct path)
+        if rep_id:
+            rep = conn.execute("SELECT * FROM sales_reps WHERE id=%s", (rep_id,)).fetchone()
+            if rep:
+                return rep
+
+        # Fallback: legacy behavior by email (keeps you unblocked)
         rep = conn.execute("SELECT * FROM sales_reps WHERE email=%s", (email,)).fetchone()
         if not rep:
-            raise HTTPException(403, "No sales rep record")
+            raise HTTPException(403, "No sales rep record (hr_users.sales_rep_id not mapped)")
         return rep
 
 def require_sales_manager(request: Request):
@@ -609,11 +622,13 @@ def approve_sales_rep(rep_id: str, payload: SalesApproveIn, request: Request):
         # create/update hr user login
         existing_user = conn.execute("SELECT id FROM hr_users WHERE email=%s", (rep["email"],)).fetchone()
         if existing_user:
-            conn.execute("UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE WHERE email=%s",
-                         (pw_hash, role_id, rep["email"]))
+            conn.execute(
+                "UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE, sales_rep_id=%s WHERE email=%s",
+                (pw_hash, role_id, rep_id, rep["email"])
+            )
         else:
-            conn.execute("INSERT INTO hr_users (id, email, password_hash, role_id, is_active) VALUES (%s,%s,%s,%s,TRUE)",
-                         (str(uuid.uuid4()), rep["email"], pw_hash, role_id))
+            conn.execute("INSERT INTO hr_users (id, email, password_hash, role_id, is_active, sales_rep_id) VALUES (%s,%s,%s,%s,TRUE,%s)",
+                         (str(uuid.uuid4()), rep["email"], pw_hash, role_id, rep_id))
 
         conn.execute("UPDATE sales_reps SET status='active', role=%s, updated_at=NOW() WHERE id=%s",
                      (payload.rep_role, rep_id))
@@ -712,11 +727,11 @@ def accept_sales_invite(payload: InviteAcceptIn, request: Request):
         pw_hash = _bcrypt_hash(payload.password)
         existing_user = conn.execute("SELECT id FROM hr_users WHERE email=%s", (email,)).fetchone()
         if existing_user:
-            conn.execute("UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE WHERE email=%s",
-                         (pw_hash, role_id, email))
+            conn.execute("UPDATE hr_users SET password_hash=%s, role_id=%s, is_active=TRUE, sales_rep_id=%s WHERE email=%s",
+                         (pw_hash, role_id, rep_id, email))
         else:
-            conn.execute("INSERT INTO hr_users (id, email, password_hash, role_id, is_active) VALUES (%s,%s,%s,%s,TRUE)",
-                         (str(uuid.uuid4()), email, pw_hash, role_id))
+            conn.execute("INSERT INTO hr_users (id, email, password_hash, role_id, is_active, sales_rep_id) VALUES (%s,%s,%s,%s,TRUE,%s)",
+                         (str(uuid.uuid4()), email, pw_hash, role_id, rep_id))
 
         conn.execute("UPDATE sales_invites SET accepted_at=NOW() WHERE id=%s", (inv["id"],))
 
@@ -1727,12 +1742,17 @@ def login(payload: LoginIn, request: Request):
     if payload.email == ADMIN_EMAIL and ADMIN_PASSWORD_HASH and verify_password(payload.password, ADMIN_PASSWORD_HASH):
         request.session["user"] = ADMIN_EMAIL
         request.session["role"] = "admin"
+        request.session["hr_user_id"] = None
+        request.session["sales_rep_id"] = None
+        request.session["profile_id"] = None
         return {"ok": True, "role": "admin"}
 
     # DB lookup
     with db() as conn:
         row = conn.execute(
-            "SELECT u.email, u.password_hash, r.name as role FROM hr_users u JOIN roles r ON u.role_id=r.id WHERE u.email=%s AND u.is_active=TRUE",
+            "SELECT u.id, u.email, u.password_hash, u.sales_rep_id, u.profile_id, r.name as role "
+            "FROM hr_users u JOIN roles r ON u.role_id=r.id "
+            "WHERE u.email=%s AND u.is_active=TRUE",
             (payload.email,)
         ).fetchone()
         if not row:
@@ -1741,7 +1761,17 @@ def login(payload: LoginIn, request: Request):
             raise HTTPException(401, "Invalid credentials")
     request.session["user"] = row["email"]
     request.session["role"] = row["role"]
-    return {"ok": True, "role": row["role"]}
+    request.session["hr_user_id"] = str(row["id"])
+    request.session["sales_rep_id"] = str(row["sales_rep_id"]) if row.get("sales_rep_id") else None
+    request.session["profile_id"] = str(row["profile_id"]) if row.get("profile_id") else None
+
+    return {
+        "ok": True,
+        "role": row["role"],
+        "hr_user_id": request.session.get("hr_user_id"),
+        "sales_rep_id": request.session.get("sales_rep_id"),
+        "profile_id": request.session.get("profile_id"),
+    }
 
 @app.post("/logout", tags=["Auth"], summary="Logout")
 def logout(request: Request):
@@ -1753,8 +1783,15 @@ def me(request: Request):
     return {
         "ok": True,
         "email": request.session.get("user"),
-        "role": request.session.get("role")
+        "role": request.session.get("role"),
+        "hr_user_id": request.session.get("hr_user_id"),
+        "sales_rep_id": request.session.get("sales_rep_id"),
+        "profile_id": request.session.get("profile_id"),
     }
+
+@app.get("/whoami", tags=["Auth"], summary="Alias of /me for frontend routing")
+def whoami(request: Request):
+    return me(request)
 # ------ Auth --------------
 
 # ------- Server-side role-gated UI routes (belt & suspenders) -------
@@ -1865,8 +1902,39 @@ def queue_company_verification(company_id: str, request: Request, max_pages: int
         created.append({"task_id": tid, "seed_url": s["url"]})
     return {"ok": True, "created_tasks": created}
 # --------------------------
-# Profiles
-# --------------------------
+
+# -------- HR Records by linked profile_id --------
+@app.get("/hr/me/profile", tags=["HR"], summary="Return my linked profile (if any)")
+def hr_me_profile(request: Request):
+    role = request.session.get("role")
+    if role not in ("employee", "manager", "admin"):
+        raise HTTPException(403, "HR only")
+    pid = request.session.get("profile_id")
+    if not pid:
+        return {"ok": True, "profile": None}
+
+    with db() as conn:
+        prof = conn.execute("SELECT * FROM profiles WHERE id=%s AND deleted_at IS NULL", (pid,)).fetchone()
+    return {"ok": True, "profile": prof}
+
+@app.get("/hr/me/records", tags=["HR"], summary="Return my HR records (by linked profile_id)")
+def hr_me_records(request: Request, limit: int = Query(200, ge=1, le=2000)):
+    role = request.session.get("role")
+    if role not in ("employee", "manager", "admin"):
+        raise HTTPException(403, "HR only")
+    pid = request.session.get("profile_id")
+    if not pid:
+        return {"ok": True, "records": []}
+
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hr_records WHERE profile_id=%s ORDER BY created_at DESC LIMIT %s",
+            (pid, limit)
+        ).fetchall()
+    return {"ok": True, "records": rows}
+# ------- HR Records by linked profile_id --------
+
+# -------- Profiles ---------
 @app.post("/profiles", tags=["Profiles"], summary="Create profile")
 def create_profile(p: ProfileIn, request: Request):
     require_manager_or_admin(request)
@@ -1893,8 +1961,6 @@ def list_profiles(
     with db() as conn:
         rows = conn.execute(sql, tuple(vals)).fetchall()
     return rows
-
-# --------------------------
 
 class VerifyWebsiteOut(BaseModel):
     profile_id: str
@@ -1977,9 +2043,9 @@ def verify_profile_website(profile_id: str, request: Request, max_pages: int = Q
         return out
     except Exception as e:
         raise HTTPException(500, f"verification failed: {e}")
-# --------------------------
-# Reviews (with moderation pipeline)
-# --------------------------
+# ------- Profiles -----------
+
+# -------- Reviews (with moderation pipeline) ---------
 BANNED_WORDS = {"kill","die","tranny","slur1","slur2"}  # minimal example
 
 def run_moderation(text: Optional[str]) -> dict:
