@@ -87,8 +87,25 @@ def deobfuscate_email(s:str)->str:
     return out.replace("(","").replace(")","").replace(" ","")
 
 def extract_emails(text:str)->List[str]:
-    raw=[m.group(1) for m in EMAIL_PAT.finditer(text or "")]
-    return list(dedupe(e.lower() for e in map(deobfuscate_email, raw) if "@" in e and "." in e.split("@")[-1]))
+    raw = [m.group(1) for m in EMAIL_PAT.finditer(text or "")]
+    out = []
+    bad_prefix = ("your@", "example@", "name@", "test@", "hello@localhost")
+    bad_domain = ("example.com", "email.com", "domain.com", "localhost")
+
+    for e in map(deobfuscate_email, raw):
+        e = (e or "").strip().lower()
+        if "@" not in e:
+            continue
+        dom = e.split("@")[-1]
+        if any(e.startswith(p) for p in bad_prefix):
+            continue
+        if dom in bad_domain:
+            continue
+        if "." not in dom:
+            continue
+        out.append(e)
+
+    return list(dedupe(out))
 
 def extract_phones(text:str)->List[str]:
     nums=set()
