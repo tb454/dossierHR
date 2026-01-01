@@ -131,9 +131,25 @@ async def scrape_rema_members(client):
 DDG_HTML = "https://duckduckgo.com/html/"
 
 SEARCH_TERMS = [
-    '"scrap metal" recycling contact',
-    '"metal recycling" "contact us"',
-    '"sell scrap" metal yard phone',
+    # core
+    '"scrap metal" "contact"',
+    '"metal recycling" "contact"',
+    '"scrap yard" "contact"',
+    '"scrap yard" "phone"',
+    '"metal recycling" "phone"',
+    '"scrap metal recycling" "hours"',
+    '"sell scrap" "phone"',
+    '"sell scrap" "contact us"',
+    # common business phrases
+    '"iron and metal" recycling contact',
+    '"scrap iron" "contact"',
+    '"aluminum recycling" "contact"',
+    '"copper recycling" "contact"',
+    '"steel recycling" "contact"',
+    '"salvage yard" "scrap metal" contact',
+    # patterns likely to expose contact info
+    'site:*/contact "scrap" "metal"',
+    'site:*/contact "recycling" "metal"',
 ]
 
 STATE_TOKENS = {
@@ -188,32 +204,39 @@ async def scrape_openweb_search(client, states:List[str])->List[Dict]:
     for st in states:
         tokens = STATE_TOKENS.get(st.upper(), [st])
         for term in SEARCH_TERMS:
-            q = f'{term} {" OR ".join(tokens)}'
-            hits = await ddg_search(client, q, max_pages=2)
-            for h in hits:
-                site = canon(h)
-                if not site or not likely_company_site(site): 
-                    continue
-                rows.append({"Name": site.replace("https://",""), "Website": site, "Region": STATE_TO_REGION.get(st.upper(), ""), "Source": f"search:ddg:{st}"})
+            for tok in tokens:
+                q = f"{term} {tok}"
+                hits = await ddg_search(client, q, max_pages=int(os.getenv("SEED_DDG_PAGES","5")))
+                for h in hits:
+                    site = canon(h)
+                    if not site or not likely_company_site(site):
+                        continue
+                    rows.append({
+                        "Name": site.replace("https://",""),
+                        "Website": site,
+                        "Region": STATE_TO_REGION.get(st.upper(), ""),
+                        "Source": f"search:ddg:{st}:{tok}"
+                    })
     return rows
 
 # ---------- NEW adapter 2: State list seeder ----------
 # Config of state-level pages that list scrap dealers / recyclers. This is a sampler; extend as you find more.
-STATE_LIST_PAGES = {
-  "AZ": [
-    # DPS Scrap Metal Dealers (public list often updates; this is the entry site you mentioned)
-    "https://www.azdps.gov/services/public/scrap-metal-dealers",
-  ],
-  "CA": [
-    # CalRecycle (metals accepted on some pages)
-    "https://calrecycle.ca.gov/homehazwaste/metal",
-  ],
-  "TX": [
-    "https://www.tceq.texas.gov/permitting/waste_permits/recycling/scrap_metals.html",
-  ],
-  "FL": [
-    "https://floridadep.gov/waste/waste-reduction/content/recycling-and-waste-reduction",
-  ],
+STATE_LIST_PAGES: Dict[str, List[str]] = {
+  "AZ": ["https://www.azdps.gov/services/public/scrap-metal-dealers"],
+  "DE": ["https://dsp.delaware.gov/pawnbrokers-secondhand-dealers-scrap-metal-processors/"],
+  "GA": ["https://gbi.georgia.gov/services/secondary-metals-recycling"],
+  "KS": ["https://www.ag.ks.gov/divisions/civil/licensing-inspections/scrap-metal-dealers"],
+  "KY": ["https://metalrecycling.ky.gov/"],
+  "MN": ["https://dps.mn.gov/divisions/bca/bca-divisions/investigative-services/scrap-metal"],
+  "MS": ["https://www.sos.ms.gov/regulation-enforcement/scrap-metal"],
+  "ND": ["https://apps.attorneygeneral.nd.gov/scrap-metal"],
+  "OH": ["https://services.dps.ohio.gov/ScrapDealer/Home/FAQ"],
+  "TN": ["https://www.tn.gov/commerce/regboards/scrap.html"],
+  "WA": ["https://dor.wa.gov/manage-business/state-endorsements/scrap-metal"],
+  "WV": ["https://apps.sos.wv.gov/business/scrapmetaldealers/"],
+  "TX": ["https://www.tceq.texas.gov/permitting/waste_permits/recycling/scrap_metals.html"],
+  "FL": ["https://floridadep.gov/waste/waste-reduction/content/recycling-and-waste-reduction"],
+  "CA": ["https://calrecycle.ca.gov/homehazwaste/metal"],
 }
 
 def extract_external_sites_from_html(html:str, base:str)->List[Dict]:
