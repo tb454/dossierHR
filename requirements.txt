@@ -13,3 +13,15 @@ reportlab==4.2.5
 httpx==0.27.2
 beautifulsoup4==4.12.3
 robotexclusionrulesparser==1.7.1
+
+#yard crawler dependencies
+httpx[http2]==0.27.2
+tldextract==5.1.2
+selectolax==0.3.20
+extruct==0.16.0
+w3lib==2.2.1
+phonenumberslite==8.13.45
+rapidfuzz==3.9.7
+python-slugify==8.0.4
+
+
