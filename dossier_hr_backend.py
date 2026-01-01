@@ -112,331 +112,9 @@ app.include_router(leads_ingest_router)
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def root():
     return RedirectResponse("/static/login.html", status_code=302)
-
-# ----- BRidge Sales  -----
-def ensure_sales_tables(conn):
-    conn.execute("""
-    -- reps
-    CREATE TABLE IF NOT EXISTS sales_reps (
-      id UUID PRIMARY KEY,
-      status TEXT NOT NULL DEFAULT 'candidate', -- candidate/active/suspended/terminated
-      legal_name TEXT,
-      email TEXT UNIQUE NOT NULL,
-      phone TEXT,
-      role TEXT NOT NULL DEFAULT 'sales_rep', -- admin/sales_manager/sales_rep/sdr
-      territory TEXT NULL,
-      vertical TEXT NULL, -- yard/mill/manufacturer/broker/other
-      referral_code TEXT UNIQUE NOT NULL,
-      agreement_signed_at TIMESTAMP NULL,
-      w9_received_at TIMESTAMP NULL,
-      payout_method TEXT NULL, -- manual/ach/stripe_connect
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    -- invites (optional; you wanted the page)
-    CREATE TABLE IF NOT EXISTS sales_invites (
-      id UUID PRIMARY KEY,
-      email TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'sales_rep',
-      invited_by_email TEXT NULL,
-      token_hash TEXT NOT NULL,
-      expires_at TIMESTAMP NOT NULL,
-      accepted_at TIMESTAMP NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE(email, token_hash)
-    );
-
-    -- plan acceptance (versioned)
-    CREATE TABLE IF NOT EXISTS commission_plans (
-      id UUID PRIMARY KEY,
-      version TEXT NOT NULL UNIQUE,   -- "v1.0"
-      rules JSONB NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS sales_rep_plan_acceptance (
-      id UUID PRIMARY KEY,
-      rep_id UUID NULL, -- NULL = house queue (unclaimed)
-      plan_version TEXT NOT NULL,
-      accepted_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      ip TEXT NULL,
-      user_agent TEXT NULL
-    );
-
-    -- companies/accounts
-    CREATE TABLE IF NOT EXISTS sales_companies (
-        id UUID PRIMARY KEY,
-        name TEXT NOT NULL,
-        domain TEXT NULL,
-        website TEXT NULL,
-        city TEXT NULL,
-        state TEXT NULL,
-        country TEXT NULL DEFAULT 'US',
-        company_type TEXT NOT NULL DEFAULT 'yard',
-        notes TEXT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-        );
-
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_sales_companies_name_domain
-        ON sales_companies (lower(name), coalesce(domain,''));
-
-        CREATE INDEX IF NOT EXISTS idx_sales_companies_domain ON sales_companies(domain);
-        CREATE INDEX IF NOT EXISTS idx_sales_companies_type ON sales_companies(company_type);
-
-    -- contacts
-    CREATE TABLE IF NOT EXISTS sales_contacts (
-      id UUID PRIMARY KEY,
-      company_id UUID NOT NULL,
-      name TEXT NOT NULL,
-      title TEXT NULL,
-      email TEXT NULL,
-      phone TEXT NULL,
-      is_primary BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sales_contacts_company ON sales_contacts(company_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_contacts_email ON sales_contacts(email);
-
-    -- company ownership + house flag + audit
-    CREATE TABLE IF NOT EXISTS sales_company_ownership (
-      id UUID PRIMARY KEY,
-      company_id UUID NOT NULL,
-      owner_rep_id UUID NULL,
-      assisting_rep_id UUID NULL,
-      house_account BOOLEAN NOT NULL DEFAULT FALSE,
-      protection_expires_at TIMESTAMP NULL,
-      ownership_start TIMESTAMP NOT NULL DEFAULT NOW(),
-      ownership_end TIMESTAMP NULL,
-      ownership_reason TEXT NOT NULL DEFAULT 'unknown',
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_company_owner_company ON sales_company_ownership(company_id);
-    CREATE INDEX IF NOT EXISTS idx_company_owner_owner ON sales_company_ownership(owner_rep_id);
-
-    CREATE TABLE IF NOT EXISTS sales_ownership_audit (
-      id UUID PRIMARY KEY,
-      entity_type TEXT NOT NULL, -- company/deal/lead
-      entity_id TEXT NOT NULL,
-      action TEXT NOT NULL, -- assign/unassign/house/transfer
-      from_rep_id UUID NULL,
-      to_rep_id UUID NULL,
-      reason TEXT NULL,
-      actor_email TEXT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    -- leads
-    CREATE TABLE IF NOT EXISTS sales_leads (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      company_id UUID NULL,
-      company_name TEXT NOT NULL,
-      domain TEXT NULL,
-      website TEXT NULL,
-      city TEXT NULL,
-      state TEXT NULL,
-      company_type TEXT NULL,   -- yard/mill/manufacturer/broker/other
-      lead_source TEXT NULL,    -- cold_outbound/inbound/referral/conference/etc
-      contact_name TEXT NULL,
-      contact_title TEXT NULL,
-      contact_email TEXT NULL,
-      contact_phone TEXT NULL,
-      stage TEXT NOT NULL DEFAULT 'new', -- new/contacted/qualified/demo_scheduled/demo_done/proposal/negotiation/closed_won/closed_lost
-      notes TEXT NULL,
-      duplicate_of UUID NULL,
-      linked_company_id UUID NULL,
-      linked_deal_id UUID NULL,
-      last_activity_at TIMESTAMP NULL,
-      next_follow_up_at TIMESTAMP NULL,
-      protection_expires_at TIMESTAMP NOT NULL DEFAULT (NOW() + INTERVAL '14 days'),
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_rep ON sales_leads(rep_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_stage ON sales_leads(stage);
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_domain ON sales_leads(domain);
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_company_id ON sales_leads(company_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_followup ON sales_leads(next_follow_up_at);
-
-    -- ---- house-queue + claim migration (safe to run repeatedly) ----
-    ALTER TABLE sales_leads
-      ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP NULL;
-
-    ALTER TABLE sales_leads
-      ADD COLUMN IF NOT EXISTS claimed_by_email TEXT NULL;
-
-    -- If this DB was created earlier with rep_id NOT NULL, drop the constraint safely.
-    DO $$
-    BEGIN
-      BEGIN
-        ALTER TABLE sales_leads ALTER COLUMN rep_id DROP NOT NULL;
-      EXCEPTION WHEN others THEN
-        -- already nullable or not present; ignore
-      END;
-    END $$;
-
-    -- Optional: partial index for house queue scans
-    CREATE INDEX IF NOT EXISTS idx_sales_leads_house_queue ON sales_leads(created_at DESC) WHERE rep_id IS NULL;
-
-    -- activities (calls/emails/notes) with optional follow-up
-    CREATE TABLE IF NOT EXISTS sales_activities (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      lead_id UUID NULL,
-      company_id UUID NULL,
-      deal_id UUID NULL,
-      activity_type TEXT NOT NULL, -- call/email/demo/note/text/other
-      notes TEXT NULL,
-      follow_up_at TIMESTAMP NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sales_activities_rep ON sales_activities(rep_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_activities_lead ON sales_activities(lead_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_activities_deal ON sales_activities(deal_id);
-
-    -- tasks / reminders
-    CREATE TABLE IF NOT EXISTS sales_tasks (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      lead_id UUID NULL,
-      company_id UUID NULL,
-      deal_id UUID NULL,
-      title TEXT NOT NULL,
-      due_at TIMESTAMP NOT NULL,
-      status TEXT NOT NULL DEFAULT 'open', -- open/done/snoozed
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      completed_at TIMESTAMP NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sales_tasks_rep_due ON sales_tasks(rep_id, due_at);
-    CREATE INDEX IF NOT EXISTS idx_sales_tasks_status ON sales_tasks(status);
-
-    -- deals (pipeline)
-    CREATE TABLE IF NOT EXISTS sales_deals (
-      id UUID PRIMARY KEY,
-      company_id UUID NOT NULL,
-      owner_rep_id UUID NOT NULL,
-      assisting_rep_id UUID NULL,
-      proposed_plan TEXT NULL, -- starter/standard/enterprise
-      expected_go_live DATE NULL,
-      expected_mrr_cents BIGINT NULL,
-      expected_tons_per_month BIGINT NULL,
-      expected_bols_per_month BIGINT NULL,
-      probability INT NOT NULL DEFAULT 20,
-      stage TEXT NOT NULL DEFAULT 'new', -- new/contacted/qualified/demo_scheduled/demo_done/proposal/negotiation/closed_won/closed_lost
-      stage_entered_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      closed_at TIMESTAMP NULL,
-      notes TEXT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sales_deals_owner ON sales_deals(owner_rep_id);
-    CREATE INDEX IF NOT EXISTS idx_sales_deals_stage ON sales_deals(stage);
-    CREATE INDEX IF NOT EXISTS idx_sales_deals_company ON sales_deals(company_id);
-
-    -- onboarding checklist per company
-    CREATE TABLE IF NOT EXISTS onboarding_checklists (
-      id UUID PRIMARY KEY,
-      company_id UUID NOT NULL,
-      deal_id UUID NULL,
-      status TEXT NOT NULL DEFAULT 'yellow', -- green/yellow/red
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      notes TEXT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS onboarding_steps (
-      id UUID PRIMARY KEY,
-      checklist_id UUID NOT NULL,
-      step_key TEXT NOT NULL,
-      label TEXT NOT NULL,
-      is_required BOOLEAN NOT NULL DEFAULT TRUE,
-      status TEXT NOT NULL DEFAULT 'todo', -- todo/doing/done/blocked
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      blocker_notes TEXT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_onboarding_company ON onboarding_checklists(company_id);
-    CREATE INDEX IF NOT EXISTS idx_onboarding_steps_checklist ON onboarding_steps(checklist_id);
-
-    -- attachments (NDA/proposal/screenshots) - store URL/path reference only
-    CREATE TABLE IF NOT EXISTS sales_attachments (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      lead_id UUID NULL,
-      company_id UUID NULL,
-      deal_id UUID NULL,
-      name TEXT NOT NULL,
-      url TEXT NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    -- assets / templates
-    CREATE TABLE IF NOT EXISTS sales_assets (
-      id UUID PRIMARY KEY,
-      name TEXT NOT NULL,
-      asset_type TEXT NOT NULL, -- pitch_deck/one_pager/fee_schedule/template/script/objections
-      url TEXT NULL,
-      notes TEXT NULL,
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    -- revenue events (manual now)
-    CREATE TABLE IF NOT EXISTS revenue_events (
-      id UUID PRIMARY KEY,
-      company_id UUID NOT NULL,
-      revenue_type TEXT NOT NULL, -- subscription/overage/addon/one_time
-      amount_cents BIGINT NOT NULL,
-      currency TEXT NOT NULL DEFAULT 'USD',
-      collected_at TIMESTAMP NOT NULL,
-      external_ref TEXT NULL,
-      created_by_email TEXT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_revenue_company_collected ON revenue_events(company_id, collected_at);
-
-    -- commission ledger (engine shaped)
-    CREATE TABLE IF NOT EXISTS commission_ledger (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      company_id UUID NOT NULL,
-      revenue_event_id UUID NULL,
-      deal_id UUID NULL,
-      line_type TEXT NOT NULL, -- activation_bonus/residual_mrr/overage_residual/adjustment
-      amount_cents BIGINT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending', -- pending/earned/payable/paid/disputed
-      net30_release_at TIMESTAMP NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      notes TEXT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_comm_ledger_rep ON commission_ledger(rep_id);
-    CREATE INDEX IF NOT EXISTS idx_comm_ledger_status ON commission_ledger(status);
-
-    CREATE TABLE IF NOT EXISTS commission_disputes (
-      id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
-      ledger_id UUID NOT NULL,
-      reason TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'open', -- open/resolved/rejected
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      resolved_at TIMESTAMP NULL,
-      resolution_notes TEXT NULL
-    );
-
-    """)
-
 # --------------------------
-# Sales constants (your plan v1.0)
-# --------------------------
+
+# ----- Sales constants (your plan v1.0) -----
 COMMISSION_PLAN_VERSION = "v1.0"
 
 PLAN_RULES_V1 = {
@@ -490,6 +168,25 @@ def _ensure_plan_row(conn):
 def _actor_email(request: Request) -> Optional[str]:
     return (request.session.get("user") or "").lower().strip() or None
 
+def log_event(
+    conn,
+    source: str,
+    event: str,
+    message: str = "",
+    status: str = "ok",
+    details: Optional[dict] = None,
+):
+    """
+    DB-truth logging into public.atlas_ingest_log (schema: source/status/event/message/details)
+    """
+    conn.execute(
+        """
+        INSERT INTO atlas_ingest_log (source, status, event, message, details)
+        VALUES (%s,%s,%s,%s,%s::jsonb)
+        """,
+        (source, status, event, message, json.dumps(details or {})),
+    )
+
 def require_sales_role(request: Request, allowed: List[str]):
     role = request.session.get("role")
     if role not in allowed:
@@ -497,8 +194,8 @@ def require_sales_role(request: Request, allowed: List[str]):
     return True
 
 def require_sales_rep(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep", "sales_manager", "admin"):
+    role = (request.session.get("role") or "").strip().lower().replace("-", "_")
+    if role not in ("sales_rep", "sales_manager", "sales_admin", "admin"):
         raise HTTPException(403, "Sales only")
 
     email = (request.session.get("user") or "").lower().strip()
@@ -508,15 +205,13 @@ def require_sales_rep(request: Request):
     rep_id = request.session.get("sales_rep_id")
 
     with db() as conn:
-        ensure_sales_tables(conn)
-
         # If mapped, use the FK link (correct path)
         if rep_id:
             rep = conn.execute("SELECT * FROM sales_reps WHERE id=%s", (rep_id,)).fetchone()
             if rep:
                 return rep
 
-        # Fallback: legacy behavior by email (keeps you unblocked)
+        # Fallback: legacy behavior by email
         rep = conn.execute("SELECT * FROM sales_reps WHERE email=%s", (email,)).fetchone()
         if not rep:
             raise HTTPException(403, "No sales rep record (hr_users.sales_rep_id not mapped)")
@@ -538,7 +233,6 @@ class SalesApplyIn(BaseModel):
 @app.post("/sales/apply", tags=["Sales"], summary="Sales rep applies (public)")
 def sales_apply(payload: SalesApplyIn, request: Request):
     with db() as conn:
-        ensure_sales_tables(conn)
         _ensure_plan_row(conn)
 
         email = payload.email.lower().strip()
@@ -556,23 +250,19 @@ def sales_apply(payload: SalesApplyIn, request: Request):
             RETURNING id, status, legal_name, email, phone, role, territory, vertical, referral_code, created_at
         """, (rep_id, payload.legal_name, email, payload.phone, role, payload.territory, payload.vertical, code)).fetchone()
 
-        conn.execute(
-            "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-            (None, "sales_rep_applied", json.dumps({"rep_id": rep_id, "email": email}))
-        )
+        log_event(conn, "dossier_hr", "sales_rep_applied", details={"rep_id": rep_id, "email": email})
 
     return {"ok": True, "rep": row}
 
 class SalesApproveIn(BaseModel):
-    rep_role: str = Field(pattern="^(sales_rep|sales_manager|admin|sdr)$")
+    rep_role: str = Field(pattern="^(sales_rep|sales_manager|sales_admin|admin|manager|employee)$")
     temp_password: str = Field(min_length=8)
 
 @app.post("/admin/sales/reps/{rep_id}/approve", tags=["Admin","Sales"], summary="Approve rep + create login user")
 def approve_sales_rep(rep_id: str, payload: SalesApproveIn, request: Request):
     require_sales_admin(request)
     actor = _actor_email(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
+    with db() as conn:       
         _ensure_plan_row(conn)
 
         rep = conn.execute("SELECT id, email, status FROM sales_reps WHERE id=%s", (rep_id,)).fetchone()
@@ -606,14 +296,13 @@ def approve_sales_rep(rep_id: str, payload: SalesApproveIn, request: Request):
         conn.execute("INSERT INTO sales_rep_plan_acceptance (id, rep_id, plan_version, ip, user_agent) VALUES (%s,%s,%s,%s,%s)",
                      (str(uuid.uuid4()), rep_id, COMMISSION_PLAN_VERSION, request.client.host if request.client else None, request.headers.get("user-agent")))
 
-        conn.execute("INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-                     (None, "sales_rep_approved", json.dumps({"rep_id": rep_id, "actor": actor, "role": payload.rep_role})))
+        log_event(conn, "dossier_hr", "sales_rep_approved", details={"rep_id": rep_id, "actor": actor, "role": payload.rep_role})
 
     return {"ok": True, "rep_id": rep_id, "status": "active"}
 
 class InviteCreateIn(BaseModel):
     email: str
-    role: str = Field(pattern="^(sales_rep|sales_manager|admin|sdr)$")
+    role: str = Field(pattern="^(sales_rep|sales_manager|sales_admin|admin|manager|employee)$")
     expires_hours: int = Field(default=72, ge=1, le=168)
 
 def _hash_invite_token(token: str) -> str:
@@ -625,7 +314,6 @@ def create_sales_invite(payload: InviteCreateIn, request: Request):
     require_sales_admin(request)
     actor = _actor_email(request)
     with db() as conn:
-        ensure_sales_tables(conn)
 
         token = uuid.uuid4().hex
         token_hash = _hash_invite_token(token)
@@ -651,8 +339,7 @@ class InviteAcceptIn(BaseModel):
 
 @app.post("/sales/invite/accept", tags=["Sales"], summary="Accept invite, create login + rep")
 def accept_sales_invite(payload: InviteAcceptIn, request: Request):
-    with db() as conn:
-        ensure_sales_tables(conn)
+    with db() as conn:      
         _ensure_plan_row(conn)
 
         token_hash = _hash_invite_token(payload.token)
@@ -713,8 +400,7 @@ def accept_sales_invite(payload: InviteAcceptIn, request: Request):
 @app.get("/admin/sales/reps", tags=["Admin","Sales"], summary="List sales reps")
 def list_sales_reps(request: Request, status: Optional[str]=None, limit: int = Query(500, ge=1, le=5000)):
     require_sales_admin(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
+    with db() as conn:       
         sql = "SELECT * FROM sales_reps WHERE 1=1"
         vals = []
         if status:
@@ -740,7 +426,6 @@ def upsert_company(payload: CompanyUpsertIn, request: Request):
     rep = require_sales_rep(request)
     dom = _extract_domain(payload.website)
     with db() as conn:
-        ensure_sales_tables(conn)
 
         # try existing by domain first
         row = None
@@ -789,7 +474,6 @@ def upsert_company(payload: CompanyUpsertIn, request: Request):
 def list_companies(request: Request, q: Optional[str]=None, limit: int = Query(200, ge=1, le=2000)):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         sql = "SELECT * FROM sales_companies WHERE 1=1"
         vals = []
         if q:
@@ -812,7 +496,6 @@ class ContactCreateIn(BaseModel):
 def create_contact(payload: ContactCreateIn, request: Request):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         cid = payload.company_id
         row = conn.execute("""
             INSERT INTO sales_contacts (id, company_id, name, title, email, phone, is_primary)
@@ -825,7 +508,6 @@ def create_contact(payload: ContactCreateIn, request: Request):
 def list_contacts(request: Request, company_id: str):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         rows = conn.execute("SELECT * FROM sales_contacts WHERE company_id=%s ORDER BY is_primary DESC, created_at DESC", (company_id,)).fetchall()
     return {"ok": True, "contacts": rows}
 
@@ -850,7 +532,6 @@ def create_lead(payload: LeadCreateIn, request: Request):
     rep = require_sales_rep(request)
     dom = _extract_domain(payload.contact_email) or _extract_domain(payload.website)
     with db() as conn:
-        ensure_sales_tables(conn)
 
         # duplicate detection by domain (same rep scope) – prevent spam duplicates
         if dom:
@@ -897,8 +578,7 @@ def create_lead(payload: LeadCreateIn, request: Request):
             payload.notes, duplicate_of, comp["id"]
         )).fetchone()
 
-        conn.execute("INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'sales_lead_created',%s)",
-                     (None, json.dumps({"lead_id": lead_id, "rep_id": str(rep["id"]), "company": payload.company_name})))
+        log_event(conn, "dossier_hr", "sales_lead_created", details={"lead_id": lead_id, "rep_id": str(rep["id"]), "company": payload.company_name, "domain": dom})
 
     return {"ok": True, "lead": row, "duplicate_of": duplicate_of}
 # --------------------------
@@ -922,7 +602,6 @@ def house_import(leads: List[HouseLeadIn], request: Request):
     require_admin(request)
     added = 0
     with db() as conn:
-        ensure_sales_tables(conn)
 
         for payload in leads:
             dom = _extract_domain(payload.contact_email) or _extract_domain(payload.website)
@@ -981,7 +660,6 @@ def house_import(leads: List[HouseLeadIn], request: Request):
 def list_house_queue(request: Request, q: Optional[str]=None, stage: Optional[str]=None, limit: int = Query(50, ge=1, le=50)):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         sql = "SELECT * FROM sales_leads WHERE rep_id IS NULL"
         vals = []
         if stage:
@@ -1000,7 +678,6 @@ def claim_house_lead(lead_id: str, request: Request):
     rep = require_sales_rep(request)
 
     with db() as conn:
-        ensure_sales_tables(conn)
 
         # Enforce max 50 active leads per rep (prevents hoarding)
         active = conn.execute("""
@@ -1059,7 +736,6 @@ def claim_house_lead(lead_id: str, request: Request):
 def list_leads(request: Request, q: Optional[str]=None, stage: Optional[str]=None, limit: int = Query(200, ge=1, le=2000)):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         sql = "SELECT * FROM sales_leads WHERE 1=1"
         vals = []
 
@@ -1085,7 +761,6 @@ class LeadPatchIn(BaseModel):
 def patch_lead(lead_id: str, payload: LeadPatchIn, request: Request):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
         if not lead:
             raise HTTPException(404, "Lead not found")
@@ -1109,8 +784,7 @@ class ActivityIn(BaseModel):
 @app.post("/sales/leads/{lead_id}/activity", tags=["Sales"], summary="Log activity on a lead")
 def log_lead_activity(lead_id: str, payload: ActivityIn, request: Request):
     rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
+    with db() as conn:  
         lead = conn.execute("SELECT id FROM sales_leads WHERE id=%s AND rep_id=%s", (lead_id, rep["id"])).fetchone()
         if not lead:
             raise HTTPException(404, "Lead not found")
@@ -1135,7 +809,6 @@ def log_lead_activity(lead_id: str, payload: ActivityIn, request: Request):
 def due_followups(request: Request, days_ahead: int = Query(0, ge=0, le=30)):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         rows = conn.execute("""
             SELECT *
             FROM sales_leads
@@ -1159,7 +832,6 @@ class TaskCreateIn(BaseModel):
 def create_task(payload: TaskCreateIn, request: Request):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         row = conn.execute("""
             INSERT INTO sales_tasks (id, rep_id, lead_id, company_id, deal_id, title, due_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s)
@@ -1171,7 +843,6 @@ def create_task(payload: TaskCreateIn, request: Request):
 def tasks_due(request: Request, days_ahead: int = Query(0, ge=0, le=30)):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         rows = conn.execute("""
             SELECT *
             FROM sales_tasks
@@ -1185,7 +856,6 @@ def tasks_due(request: Request, days_ahead: int = Query(0, ge=0, le=30)):
 def complete_task(task_id: str, request: Request):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         row = conn.execute("""
             UPDATE sales_tasks
             SET status='done', completed_at=NOW()
@@ -1213,7 +883,6 @@ class DealCreateIn(BaseModel):
 def create_deal(payload: DealCreateIn, request: Request):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         deal_id = str(uuid.uuid4())
         row = conn.execute("""
             INSERT INTO sales_deals (
@@ -1234,7 +903,6 @@ def create_deal(payload: DealCreateIn, request: Request):
 def list_deals(request: Request, stage: Optional[str]=None, q: Optional[str]=None, limit: int = Query(300, ge=1, le=5000)):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
 
         sql = """
             SELECT d.*, c.name as company_name, c.company_type, c.domain
@@ -1268,7 +936,6 @@ class DealPatchIn(BaseModel):
 def patch_deal(deal_id: str, payload: DealPatchIn, request: Request):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
 
         d = conn.execute("SELECT * FROM sales_deals WHERE id=%s", (deal_id,)).fetchone()
         if not d:
@@ -1337,7 +1004,6 @@ def _compute_checklist_status(steps) -> str:
 def create_onboarding(request: Request, company_id: str, deal_id: Optional[str]=None):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         existing = conn.execute("SELECT * FROM onboarding_checklists WHERE company_id=%s ORDER BY created_at DESC LIMIT 1", (company_id,)).fetchone()
         if existing:
             return {"ok": True, "checklist": existing, "created": False}
@@ -1361,7 +1027,6 @@ def create_onboarding(request: Request, company_id: str, deal_id: Optional[str]=
 def get_onboarding(company_id: str, request: Request):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         chk = conn.execute("SELECT * FROM onboarding_checklists WHERE company_id=%s ORDER BY created_at DESC LIMIT 1", (company_id,)).fetchone()
         if not chk:
             return {"ok": True, "checklist": None, "steps": []}
@@ -1376,7 +1041,6 @@ class StepPatchIn(BaseModel):
 def patch_onboarding_step(step_id: str, payload: StepPatchIn, request: Request):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         step = conn.execute("SELECT * FROM onboarding_steps WHERE id=%s", (step_id,)).fetchone()
         if not step:
             raise HTTPException(404, "Step not found")
@@ -1399,7 +1063,6 @@ def patch_onboarding_step(step_id: str, payload: StepPatchIn, request: Request):
 def onboarding_stuck(request: Request, status: str = Query("red", pattern="^(red|yellow)$"), limit: int = Query(200, ge=1, le=2000)):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         sql = """
           SELECT o.*, c.name as company_name
           FROM onboarding_checklists o
@@ -1422,7 +1085,6 @@ def onboarding_stuck(request: Request, status: str = Query("red", pattern="^(red
 def list_assets(request: Request):
     _ = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         rows = conn.execute("SELECT * FROM sales_assets ORDER BY updated_at DESC").fetchall()
     return {"ok": True, "assets": rows}
 
@@ -1436,7 +1098,6 @@ class AssetUpsertIn(BaseModel):
 def upsert_asset(payload: AssetUpsertIn, request: Request):
     require_sales_admin(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         existing = conn.execute("SELECT * FROM sales_assets WHERE name=%s AND asset_type=%s LIMIT 1", (payload.name, payload.asset_type)).fetchone()
         if existing:
             row = conn.execute("""
@@ -1534,7 +1195,6 @@ def post_revenue(payload: RevenuePostIn, request: Request):
     require_sales_admin(request)
     actor = _actor_email(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         _ensure_plan_row(conn)
 
         # create revenue event
@@ -1584,8 +1244,7 @@ def post_revenue(payload: RevenuePostIn, request: Request):
 @app.get("/admin/sales/revenue", tags=["Admin","Sales"], summary="List revenue events (admin)")
 def list_revenue(request: Request, limit: int = Query(500, ge=1, le=5000)):
     require_sales_admin(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
+    with db() as conn: 
         rows = conn.execute("""
             SELECT r.*, c.name as company_name
             FROM revenue_events r
@@ -1599,7 +1258,6 @@ def list_revenue(request: Request, limit: int = Query(500, ge=1, le=5000)):
 def my_ledger(request: Request, limit: int = Query(500, ge=1, le=5000)):
     rep = require_sales_rep(request)
     with db() as conn:
-        ensure_sales_tables(conn)
         rows = conn.execute("""
             SELECT l.*, c.name as company_name
             FROM commission_ledger l
@@ -1616,8 +1274,7 @@ def my_ledger(request: Request, limit: int = Query(500, ge=1, le=5000)):
 @app.get("/sales/dashboard", tags=["Sales"], summary="Rep dashboard summary")
 def rep_dashboard(request: Request):
     rep = require_sales_rep(request)
-    with db() as conn:
-        ensure_sales_tables(conn)
+    with db() as conn: 
         leads_due = conn.execute("""
             SELECT COUNT(*)::int AS cnt
             FROM sales_leads
@@ -1657,7 +1314,6 @@ def rep_dashboard(request: Request):
 def admin_dashboard_sales(request: Request):
     require_sales_manager(request)
     with db() as conn:
-        ensure_sales_tables(conn)
 
         pipeline = conn.execute("""
             SELECT stage, COUNT(*)::int AS cnt
@@ -1879,15 +1535,14 @@ def ingest_raw_entities(payload: IngestPushIn, request: Request):
 
 # ----- startup events -----
 @app.on_event("startup")
-def _startup_sales_tables():
+def _startup_checks():
     try:
         with db() as conn:
-            ensure_sales_tables(conn)
             _ensure_plan_row(conn)
     except Exception as e:
         if ENV == "production":
             raise
-        log.warning("sales_startup_tables_failed", err=str(e))
+        log.warning("startup_checks_failed", err=str(e))
 # ----- startup events -----
 
 # ----------- Passive ingestion -----------
@@ -1901,16 +1556,6 @@ class DossierEvent(BaseModel):
 @app.post("/dossier-dump", tags=["Sync"], summary="Passive nightly dump from other platforms")
 def dossier_dump(e: DossierEvent):
     with db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS dossier_behavior_log (
-              id UUID PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              source_product TEXT NOT NULL,
-              activity_type TEXT NOT NULL,
-              raw_data JSONB,
-              timestamp TIMESTAMP NOT NULL DEFAULT NOW()
-            )
-        """)
         conn.execute("""
             INSERT INTO dossier_behavior_log (id, user_id, source_product, activity_type, raw_data, timestamp)
             VALUES (%s,%s,%s,%s,%s,%s)
@@ -2005,7 +1650,7 @@ def redirect_for_role(r: str) -> str:
         return "/static/manager.html"
     if r == "sales_manager":
         return "/static/sales-manager.html"
-    if r in ("sales_rep", "sdr"):
+    if r == "sales_rep":
         return "/static/sales-portal.html"
     return "/static/employee.html"
 
@@ -2211,17 +1856,33 @@ def bulk_upsert_companies(items: List[CompanyIn], request: Request):
             # attach seeds (and push into frontier queue)
             for s in it.seeds:
                 try:
-                    sid = str(uuid.uuid4())
+                    # 1) store company seed (provenance)
+                    company_seed_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO company_seeds (id, company_id, url, scope, source) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (sid, cid, str(s.url), s.scope, s.source)
+                        (company_seed_id, cid, str(s.url), s.scope, s.source)
                     )
-                    # also mirror into scrape_frontier so scheduler will pick it up
+
+                    # 2) ensure scrape_seeds row exists (scrape_frontier.seed_id FK references scrape_seeds.id)
+                    seed_row = conn.execute("SELECT id FROM scrape_seeds WHERE url=%s LIMIT 1", (str(s.url),)).fetchone()
+                    if seed_row:
+                        scrape_seed_id = seed_row["id"]
+                    else:
+                        scrape_seed_id = str(uuid.uuid4())
+                        conn.execute(
+                            "INSERT INTO scrape_seeds (id, url, scope, reason, enabled) VALUES (%s,%s,%s,%s,TRUE)",
+                            (scrape_seed_id, str(s.url), s.scope, f"company:{cid}")
+                        )
+
+                    # 3) push into frontier
                     pu = urlparse(str(s.url))
                     conn.execute(
-                        "INSERT INTO scrape_frontier (id, seed_id, url, host, scope, priority) "
-                        "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (str(uuid.uuid4()), sid, str(s.url), pu.netloc.lower(), s.scope, 50)
+                        """
+                        INSERT INTO scrape_frontier (id, seed_id, url, host, scope, priority)
+                        VALUES (%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (url) DO NOTHING
+                        """,
+                        (str(uuid.uuid4()), scrape_seed_id, str(s.url), pu.netloc.lower(), s.scope, 50)
                     )
                     seeds_added += 1
                 except Exception:
@@ -2356,12 +2017,17 @@ def verify_profile_website(profile_id: str, request: Request, max_pages: int = Q
                 # store result for provenance (ad hoc, separate from /scraper/tasks)
                 with db() as conn:
                     conn.execute(
-                        "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'web_verify',%s)",
+                        "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'verification',%s)",
                         (prof["id"], json.dumps({
-                            "url": rec["url"], "status_code": rec["status_code"],
-                            "title": rec["title"], "canonical_url": rec["canonical_url"],
-                            "meta_sample": list(rec["meta"].keys())[:8],
-                            "ts": rec["fetched_at"].isoformat()
+                            "kind": "website_probe",
+                            "probe": {
+                                "url": rec.get("url"),
+                                "status_code": rec.get("status_code"),
+                                "title": rec.get("title"),
+                                "canonical_url": rec.get("canonical_url"),
+                                "meta_sample": list((rec.get("meta") or {}).keys())[:8],
+                                "ts": rec.get("fetched_at").isoformat() if rec.get("fetched_at") else None,
+                            }
                         }, default=str))
                     )
 
@@ -2384,14 +2050,10 @@ def verify_profile_website(profile_id: str, request: Request, max_pages: int = Q
         out = VerifyWebsiteOut(profile_id=prof["id"], target_url=seed, found_canonical=found,
                                title_match=title_match, status=status, notes=notes)
         # persist verification summary
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO verifications (profile_id, kind, status, meta) VALUES (%s,%s,%s,%s)",
-                (prof["id"], "website", status, json.dumps(out.model_dump()))
-            )
+        with db() as conn:            
             conn.execute(
                 "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'verification',%s)",
-                (prof["id"], json.dumps({"kind":"website","status":status,"details":out.model_dump()}))
+                (prof["id"], json.dumps({"kind": "website", "status": status, "details": out.model_dump()}))
             )
         return out
     except Exception as e:
@@ -2400,19 +2062,36 @@ def verify_profile_website(profile_id: str, request: Request, max_pages: int = Q
 
 # -------- insert_raw_entity -----------
 def insert_raw_entity(conn, run_id, entity_type, source_url, fingerprint, payload: dict):
+    """
+    DB-truth upsert WITHOUT relying on (entity_type,fingerprint) unique constraint.
+    """
+    existing = conn.execute(
+        "SELECT id FROM raw_entities WHERE entity_type=%s AND fingerprint=%s LIMIT 1",
+        (entity_type, fingerprint),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """
+            UPDATE raw_entities
+            SET payload=%s::jsonb,
+                source_url=%s,
+                fetched_at=NOW()
+            WHERE id=%s
+            """,
+            (json.dumps(payload), source_url, existing["id"]),
+        )
+        return str(existing["id"])
+
     row_id = str(uuid.uuid4())
-    with conn.cursor() as cur:
-        cur.execute("""
-            insert into raw_entities (id, run_id, entity_type, source_url, fingerprint, payload)
-            values (%s,%s,%s,%s,%s,%s::jsonb)
-            on conflict (entity_type, fingerprint) do update
-              set payload = excluded.payload,
-                  source_url = excluded.source_url,
-                  fetched_at = now()
-            returning id
-        """, (row_id, run_id, entity_type, source_url, fingerprint, json.dumps(payload)))
-        row = cur.fetchone()
-        return row["id"] if row else None
+    conn.execute(
+        """
+        INSERT INTO raw_entities (id, run_id, entity_type, source_url, fingerprint, payload)
+        VALUES (%s,%s,%s,%s,%s,%s::jsonb)
+        """,
+        (row_id, run_id, entity_type, source_url, fingerprint, json.dumps(payload)),
+    )
+    return row_id
     
 def upsert_company(conn, payload: dict):
     company_id = str(uuid.uuid4())
@@ -2585,8 +2264,6 @@ def normalize_run_to_house_queue(request: Request, run_id: str = Query(..., desc
     skipped = 0
 
     with db() as conn:
-        ensure_sales_tables(conn)
-
         rows = conn.execute("""
             SELECT id, entity_type, source_url, payload
             FROM raw_entities
@@ -2773,8 +2450,10 @@ def approve_verification(verification_id: str, request: Request):
     with db() as conn:
         row = conn.execute("UPDATE verifications SET status='approved', reviewed_at=NOW() WHERE id=%s RETURNING profile_id", (verification_id,)).fetchone()
         if row:
-            conn.execute("INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'verification',%s)",
-                         (row["profile_id"], json.dumps({"verification_id": verification_id, "status": "approved"})))
+            conn.execute(
+                "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,'verification',%s)",
+                (row["profile_id"], json.dumps({"verification_id": verification_id, "status": "approved"})),
+            )
     return {"ok": True}
 
 # --------------------------
@@ -2840,7 +2519,7 @@ async def sync_product(
     product: str,
     request: Request,
     x_signature: Optional[str] = Header(None),
-    idempotency_key: Optional[str] = Header(None)
+    idempotency_key: Optional[str] = Header(None),
 ):
     body = await request.body()
     _verify_hmac_by_product(body, x_signature, product)
@@ -2850,29 +2529,28 @@ async def sync_product(
     except Exception:
         raise HTTPException(400, "Invalid JSON")
 
+    events = payload.get("events", []) or []
     processed = 0
-    with db() as conn:
-        # ensure idempotency table exists
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ingest_ids (
-              id TEXT PRIMARY KEY,
-              created_at TIMESTAMP NOT NULL DEFAULT NOW()
-            )
-        """)
-        if idempotency_key:
-            exists = conn.execute("SELECT 1 FROM ingest_ids WHERE id=%s", (idempotency_key,)).fetchone()
-            if exists:
-                return {"ok": True, "product": product, "deduped": True, "processed": 0}
-            conn.execute("INSERT INTO ingest_ids (id) VALUES (%s)", (idempotency_key,))
 
-        for e in payload.get("events", []):
-            # tag the source for analytics
-            e["source"] = product
-            conn.execute(
-                "INSERT INTO hr_records (profile_id, event_type, payload) VALUES (%s,%s,%s)",
-                (e.get("profile_id"), f"{product}_event", json.dumps(e))
-            )
-            processed += 1
+    with db() as conn:
+        # Idempotency stored via atlas_ingest_log.details.idempotency_key
+        if idempotency_key:
+            already = conn.execute(
+                "SELECT 1 FROM atlas_ingest_log WHERE details->>'idempotency_key'=%s LIMIT 1",
+                (idempotency_key,),
+            ).fetchone()
+            if already:
+                return {"ok": True, "product": product, "deduped": True, "processed": 0}
+
+        log_event(
+            conn,
+            source=product,
+            event="sync_batch",
+            message=f"events={len(events)}",
+            details={"idempotency_key": idempotency_key, "events": events[:50]},
+        )
+
+        processed = len(events)
 
     return {"ok": True, "product": product, "processed": processed}
 
@@ -2900,54 +2578,18 @@ async def atlas_ingest(
     except Exception:
         raise HTTPException(400, "Invalid Atlas payload")
 
-    # 3) Store a durable log row + mirror into hr_records
+    # 3) Store a durable log row (DB-truth schema)
     with db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS atlas_ingest_log (
-              id UUID PRIMARY KEY,
-              source_system TEXT NOT NULL,
-              source_table  TEXT NOT NULL,
-              source_id     TEXT NOT NULL,
-              event_type    TEXT NOT NULL,
-              payload       JSONB,
-              created_at    TIMESTAMP NOT NULL DEFAULT NOW()
-            )
-        """)
-
-        conn.execute(
-            """
-            INSERT INTO atlas_ingest_log (
-              id, source_system, source_table, source_id, event_type, payload
-            ) VALUES (%s,%s,%s,%s,%s,%s)
-            """,
-            (
-                str(uuid.uuid4()),
-                ev.source_system,
-                ev.source_table,
-                ev.source_id,
-                ev.event_type,
-                json.dumps(ev.payload),
-            ),
-        )
-
-        # For now, attach to a "global" profile (or None) and keep full context in payload.
-        # Later you can resolve buyer/seller → profile_id if you want.
-        conn.execute(
-            """
-            INSERT INTO hr_records (profile_id, event_type, payload)
-            VALUES (%s,%s,%s)
-            """,
-            (
-                None,
-                f"{ev.source_system}:{ev.event_type}",
-                json.dumps(
-                    {
-                        "source_table": ev.source_table,
-                        "source_id": ev.source_id,
-                        **(ev.payload or {}),
-                    }
-                ),
-            ),
+        log_event(
+            conn,
+            source=(ev.source_system or "bridge").lower(),
+            event=ev.event_type,
+            message=f"{ev.source_table}:{ev.source_id}",
+            details={
+                "source_table": ev.source_table,
+                "source_id": ev.source_id,
+                "payload": ev.payload or {},
+            },
         )
 
     return {"ok": True}
@@ -2961,24 +2603,16 @@ def recent_bridge(limit: int = Query(25, ge=1, le=200)):
         # atlas_ingest_log (authoritative when using /atlas/ingest)
         atlas = conn.execute("""
             SELECT created_at,
-                   source_system || ':' || event_type AS event_type,
-                   payload
+                   source || ':' || COALESCE(event,'') AS event_type,
+                   details AS payload
             FROM atlas_ingest_log
-            WHERE lower(source_system) = 'bridge'
+            WHERE lower(source) = 'bridge'
             ORDER BY created_at DESC
             LIMIT %s
         """, (limit,)).fetchall()
 
         # hr_records (used by /sync/bridge)
-        hr = conn.execute("""
-            SELECT created_at,
-                   event_type,
-                   payload
-            FROM hr_records
-            WHERE lower(event_type) LIKE 'bridge%%'
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,)).fetchall()
+        hr = []
 
     # merge, sort by created_at desc, then cap to limit
     rows = [
