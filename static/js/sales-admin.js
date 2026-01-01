@@ -1,3 +1,4 @@
+// static/js/sales-admin.js
 import { reqJSON, esc } from "./sales-common.js";
 
 async function loadReps() {

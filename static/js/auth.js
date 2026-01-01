@@ -19,37 +19,6 @@ async function fetchJSON(url, opts = {}) {
   return data ?? {};
 }
 
-function gotoDashboard(role) {
-  role = (role || '').toString().trim().toLowerCase().replaceAll('-', '_');
-
-  if (role === 'admin') {
-    location.href = '/dashboard/admin';
-    return;
-  }
-
-  if (role === 'manager') {
-    location.href = '/dashboard/manager';
-    return;
-  }
-
-  // Sales manager
-  if (role === 'sales_manager' || role === 'salesmanager') {
-    // You already serve sales-manager.html here
-    location.href = '/dashboard/sales-manager';
-    return;
-  }
-
-  // Sales rep (and SDR)
-  if (role === 'sales_rep' || role === 'salesrep' || role === 'sdr') {
-    // This is your sales portal page (sales-portal.html)
-    location.href = '/dashboard/sales';
-    return;
-  }
-
-  // Default HR employee
-  location.href = '/dashboard/employee';
-}
-
 function onLoginPage() {
   return location.pathname.endsWith('/static/login.html') || location.pathname.endsWith('/login.html');
 }
@@ -74,16 +43,19 @@ async function requireRole(allowedRoles = []) {
   const who = await getMe();
   const role = who?.role;
 
-  if (!role) {
+  // Not logged in
+  if (!who || who.ok !== true || !role) {
     if (!onLoginPage()) location.href = '/static/login.html';
     return null;
   }
 
-  if (allowedRoles.length && !allowedRoles.includes(role)) {
-    // Wrong page for this role — route them to their home
-    gotoDashboard(role);
+  // Role not allowed -> bounce them to THEIR server-provided dashboard
+  if (Array.isArray(allowedRoles) && allowedRoles.length > 0 && !allowedRoles.includes(role)) {
+    const dest = who.redirect || '/dashboard/employee';
+    location.href = dest;
     return null;
   }
+
   return who;
 }
 
@@ -94,9 +66,11 @@ async function login(email, password) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
-  // API returns {ok:true, role:'...'}
-  if (data.redirect) location.href = data.redirect;
-  else gotoDashboard(data.role);
+
+  // Server decides destination. No gotoDashboard() needed.
+  const dest = data.redirect || '/dashboard/employee';
+  location.href = dest;
+  return data;
 }
 
 // Convenience: logout and go back to login

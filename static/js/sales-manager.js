@@ -1,3 +1,4 @@
+// static/js/sales-manager.js
 import { reqJSON, esc, money } from "./sales-common.js";
 
 document.addEventListener("DOMContentLoaded", async () => {

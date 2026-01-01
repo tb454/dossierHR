@@ -1,4 +1,4 @@
-// Handles login form + smart redirect
+// login.js
 (async function () {
   const form = document.querySelector('#loginForm'); // <-- FIX
   if (!form) return;

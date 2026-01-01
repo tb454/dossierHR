@@ -1,4 +1,4 @@
-// Admin: gate, show quick proof panels (profiles + reviews/day + dump button)
+// Admin.js
 (async function () {
     function renderIngest(rows, el) {
     if (!el) return;

@@ -512,10 +512,9 @@ def require_sales_rep(request: Request):
 def require_sales_manager(request: Request):
     require_sales_role(request, ["sales_manager","admin"])
     return True
+# --------------------------
 
-# --------------------------
-# UI routes (serve static pages, CSP-safe)
-# --------------------------
+# ------ UI routes (serve static pages, CSP-safe) -----
 def _serve_sales_html(filename: str) -> HTMLResponse:
     p = STATIC_DIR / filename
     if not p.exists():
@@ -2042,6 +2041,18 @@ def require_manager_or_admin(req: Request):
         raise HTTPException(403, "Manager/Admin only")
     return True
 
+def redirect_for_role(r: str) -> str:
+    r = (r or "").strip().lower().replace("-", "_")
+    if r == "admin":
+        return "/dashboard/admin"
+    if r == "manager":
+        return "/dashboard/manager"
+    if r == "sales_manager":
+        return "/dashboard/sales-manager"
+    if r in ("sales_rep", "sdr"):
+        return "/dashboard/sales"
+    return "/dashboard/employee"
+
 # -------- Health -----------
 @app.get("/health", tags=["System"], summary="Healthcheck")
 def health():
@@ -2058,7 +2069,7 @@ def login(payload: LoginIn, request: Request):
         request.session["hr_user_id"] = None
         request.session["sales_rep_id"] = None
         request.session["profile_id"] = None
-        return {"ok": True, "role": "admin"}
+        return {"ok": True, "role": "admin", "redirect": redirect_for_role("admin")}
 
     # DB lookup
     with db() as conn:
@@ -2080,27 +2091,14 @@ def login(payload: LoginIn, request: Request):
 
     role = row["role"]
 
-    def _redirect_for_role(r: str) -> str:
-        r = (r or "").strip().lower().replace("-", "_")
-        if r == "admin":
-            return "/dashboard/admin"
-        if r == "manager":
-            return "/dashboard/manager"
-        if r == "sales_manager":
-            return "/dashboard/sales-manager"
-        if r in ("sales_rep", "sdr"):
-            return "/dashboard/sales"
-        return "/dashboard/employee"
-
     return {
         "ok": True,
         "role": role,
-        "redirect": _redirect_for_role(role),
+        "redirect": redirect_for_role(role),
         "hr_user_id": request.session.get("hr_user_id"),
         "sales_rep_id": request.session.get("sales_rep_id"),
         "profile_id": request.session.get("profile_id"),
     }
-
 
 @app.post("/logout", tags=["Auth"], summary="Logout")
 def logout(request: Request):
@@ -2118,6 +2116,7 @@ def me(request: Request):
         "ok": True,
         "email": email,
         "role": role,
+        "redirect": redirect_for_role(role),
         "hr_user_id": request.session.get("hr_user_id"),
         "sales_rep_id": request.session.get("sales_rep_id"),
         "profile_id": request.session.get("profile_id"),
@@ -2161,7 +2160,6 @@ def admin_link_hr_user(payload: LinkUserIn, request: Request):
             request.session["profile_id"] = str(fresh["profile_id"]) if fresh.get("profile_id") else None
 
     return {"ok": True}
-
 # ------ Auth --------------
 
 # ------- Server-side role-gated UI routes (belt & suspenders) -------
