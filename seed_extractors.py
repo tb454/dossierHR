@@ -199,6 +199,85 @@ async def ddg_search(client, query:str, max_pages:int=2)->List[str]:
         params["s"] = str((page+1)*30)
     return links
 
+async def resolve_company_site(client, name: str, city: str, st: str) -> str:
+    name = clean_text(name)
+    city = clean_text(city)
+    st = (st or "").upper().strip()
+
+    if not name:
+        return ""
+
+    queries = [
+        f"\"{name}\" {city} {st} scrap metal",
+        f"\"{name}\" {city} {st} metal recycling",
+        f"\"{name}\" {city} {st} contact",
+        f"{name} {city} {st} scrap yard",
+    ]
+
+    for q in queries:
+        hits = await ddg_search(client, q, max_pages=1)
+        for h in hits:
+            site = canon(h)
+            if site and likely_company_site(site):
+                return site
+
+    return ""
+
+async def scrape_az_dps_stores(client) -> List[Dict]:
+    url = "https://www.azdps.gov/services/enforcement-services/scrap/stores"
+    html = await fetch(client, url)
+    if not html:
+        return []
+
+    doc = HTMLParser(html)
+    candidates = []
+
+    # The page is a table; store links are internal, so we resolve websites via DDG.
+    for a in doc.css('a[href^="/scrap-metal-store/"], a[href^="/content/scrap-metal-dealer/"]'):
+        name = clean_text(a.text())
+        if not name:
+            continue
+
+        # climb to <tr> then grab TDs for city (2nd cell usually)
+        tr = a.parent
+        while tr and getattr(tr, "tag", None) != "tr":
+            tr = tr.parent
+
+        city = ""
+        if tr:
+            tds = tr.css("td")
+            if len(tds) >= 2:
+                city = clean_text(tds[1].text())
+
+        candidates.append((name, city))
+
+    # de-dupe name+city
+    seen = set()
+    deduped = []
+    for n, c in candidates:
+        key = (n.lower(), c.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((n, c))
+
+    sem = asyncio.Semaphore(int(os.getenv("SEED_AZ_RESOLVE_CONC", "8")))
+    out: List[Dict] = []
+
+    async def worker(nm, ct):
+        async with sem:
+            site = await resolve_company_site(client, nm, ct, "AZ")
+            if site:
+                out.append({
+                    "Name": nm,
+                    "Website": site,
+                    "Region": STATE_TO_REGION.get("AZ", ""),
+                    "Source": "state:AZ:azdps+ddg"
+                })
+
+    await asyncio.gather(*(worker(n, c) for (n, c) in deduped))
+    return out
+
 async def scrape_openweb_search(client, states:List[str])->List[Dict]:
     rows=[]
     for st in states:
@@ -239,34 +318,59 @@ STATE_LIST_PAGES: Dict[str, List[str]] = {
   "CA": ["https://calrecycle.ca.gov/homehazwaste/metal"],
 }
 
-def extract_external_sites_from_html(html:str, base:str)->List[Dict]:
-    out=[]
+def extract_external_sites_from_html(html: str, base: str) -> List[Dict]:
+    out = []
     doc = HTMLParser(html)
+
+    base_host = urlparse(base).netloc.lower().split(":")[0]
+    if base_host.startswith("www."):
+        base_host = base_host[4:]
+
     for a in doc.css("a[href]"):
-        h=a.attributes.get("href","").strip()
-        if not h: continue
-        if h.startswith("mailto:") or h.startswith("tel:"): continue
+        h = (a.attributes.get("href", "") or "").strip()
+        if not h:
+            continue
+        if h.startswith(("mailto:", "tel:")):
+            continue
+        if any(h.lower().endswith(ext) for ext in (".pdf", ".doc", ".docx", ".xls", ".xlsx")):
+            continue
+
         full = urljoin(base, h)
         site = canon(full)
-        if not site: continue
-        # skip self-domain / social / nav noise
-        if urlparse(base).netloc.split(":")[0].lower() in site: 
+        if not site:
             continue
-        if not likely_company_site(site): 
+
+        site_host = urlparse(site).netloc.lower().split(":")[0]
+        if site_host.startswith("www."):
+            site_host = site_host[4:]
+
+        # skip self domain
+        if site_host == base_host:
             continue
-        name = clean_text(a.text()) or site.replace("https://","")
+
+        # skip socials / aggregators
+        if not likely_company_site(site):
+            continue
+
+        name = clean_text(a.text()) or site.replace("https://", "")
         out.append({"Name": name, "Website": site})
+
     return out
 
-async def scrape_state_lists(client, states:List[str])->List[Dict]:
-    rows=[]
+async def scrape_state_lists(client, states: List[str]) -> List[Dict]:
+    rows = []
     for st in states:
-        for url in STATE_LIST_PAGES.get(st.upper(), []):
-            html = await fetch(client, url)
-            if not html: continue
-            ex = extract_external_sites_from_html(html, url)
-            for r in ex:
-                rows.append({"Name": r["Name"], "Website": r["Website"], "Region": STATE_TO_REGION.get(st.upper(), ""), "Source": f"state:{st}"})
+        st = st.upper()
+
+        # Real public list we can parse → resolve dealer sites
+        if st == "AZ":
+            rows.extend(await scrape_az_dps_stores(client))
+            continue
+
+        # For other states: these pages are compliance/registry info, NOT dealer websites.
+        # Don’t treat them as crawlable company sites.
+        continue
+
     return rows
 
 # ---------- Orchestrator ----------
