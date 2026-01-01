@@ -1,3 +1,4 @@
+// sales-common.js
 export async function reqJSON(url, opts = {}) {
   const res = await fetch(url, {
     credentials: "include",

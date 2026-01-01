@@ -698,7 +698,7 @@ def create_sales_invite(payload: InviteCreateIn, request: Request):
         """, (inv_id, payload.email.lower().strip(), payload.role, actor, token_hash, expires_at))
 
     # you can email this yourself for now
-    invite_url = f"/apply/sales/invite?token={token}"
+    invite_url = f"/static/sales-invite-accept.html?token={token}"
     return {"ok": True, "invite_url": invite_url, "expires_at": expires_at.isoformat()}
 
 class InviteAcceptIn(BaseModel):
@@ -2043,8 +2043,7 @@ def require_manager_or_admin(req: Request):
 
 def redirect_for_role(r: str) -> str:
     r = (r or "").strip().lower().replace("-", "_")
-
-    # Pure static UI (no /dashboard routes)
+    
     if r == "admin":
         return "/static/admin.html"
     if r == "manager":
@@ -2066,7 +2065,7 @@ def health():
 @limiter.limit("10/minute")
 def login(payload: LoginIn, request: Request):
     # Quick admin fallback
-    if payload.email == ADMIN_EMAIL and ADMIN_PASSWORD_HASH and verify_password(payload.password, ADMIN_PASSWORD_HASH):
+    if (payload.email or "").lower().strip() == (ADMIN_EMAIL or "").lower().strip() and ADMIN_PASSWORD_HASH and verify_password(payload.password, ADMIN_PASSWORD_HASH):
         request.session["user"] = ADMIN_EMAIL
         request.session["role"] = "admin"
         request.session["hr_user_id"] = None
@@ -2079,8 +2078,8 @@ def login(payload: LoginIn, request: Request):
         row = conn.execute(
             "SELECT u.id, u.email, u.password_hash, u.sales_rep_id, u.profile_id, r.name as role "
             "FROM hr_users u JOIN roles r ON u.role_id=r.id "
-            "WHERE u.email=%s AND u.is_active=TRUE",
-            (payload.email,)
+            "WHERE lower(u.email)=lower(%s) AND u.is_active=TRUE",
+            ((payload.email or "").lower().strip(),)
         ).fetchone()
         if not row:
             raise HTTPException(401, "Invalid credentials")
@@ -2165,35 +2164,62 @@ def admin_link_hr_user(payload: LinkUserIn, request: Request):
     return {"ok": True}
 # ------ Auth --------------
 
-# ------- Server-side role-gated UI routes (belt & suspenders) -------
-def _serve_html(name: str) -> HTMLResponse:
-    path = STATIC_DIR / name
-    if not path.exists():
-        raise HTTPException(404, "Page not found")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+# ------- UI aliases (NO dashboard logic; just redirect to static pages) -------
+def _ui_to(path: str) -> RedirectResponse:
+    return RedirectResponse(path, status_code=302)
 
-@app.get("/dashboard/employee", tags=["UI"], summary="Employee dashboard (role-gated)")
-def ui_employee(request: Request):
-    role = request.session.get("role")
-    if role not in ("employee", "manager", "admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_html("employee.html")
+@app.get("/dashboard/employee", include_in_schema=False)
+def ui_employee_alias():
+    return _ui_to("/static/employee.html")
 
-@app.get("/dashboard/manager", tags=["UI"], summary="Manager dashboard (role-gated)")
-def ui_manager(request: Request):
-    role = request.session.get("role")
-    if role not in ("manager", "admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_html("manager.html")
+@app.get("/dashboard/manager", include_in_schema=False)
+def ui_manager_alias():
+    return _ui_to("/static/manager.html")
 
-@app.get("/dashboard/admin", tags=["UI"], summary="Admin dashboard (role-gated)")
-def ui_admin(request: Request):
-    role = request.session.get("role")
-    if role != "admin":
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_html("admin.html")
-# --------- Server-side role-gated UI routes (belt & suspenders) ---------
+@app.get("/dashboard/admin", include_in_schema=False)
+def ui_admin_alias():
+    return _ui_to("/static/admin.html")
 
+@app.get("/dashboard/sales", include_in_schema=False)
+def ui_sales_portal_alias():
+    return _ui_to("/static/sales-portal.html")
+
+@app.get("/dashboard/sales-manager", include_in_schema=False)
+def ui_sales_manager_alias():
+    return _ui_to("/static/sales-manager.html")
+
+@app.get("/sales/admin/ui", include_in_schema=False)
+def ui_sales_admin_alias():
+    return _ui_to("/static/sales-admin.html")
+
+@app.get("/sales/manager/ui", include_in_schema=False)
+def ui_sales_manager_ui_alias():
+    return _ui_to("/static/sales-manager.html")
+
+@app.get("/sales/leads/ui", include_in_schema=False)
+def ui_sales_leads_alias():
+    return _ui_to("/static/sales-leads.html")
+
+@app.get("/sales/deals/ui", include_in_schema=False)
+def ui_sales_deals_alias():
+    return _ui_to("/static/sales-deals.html")
+
+@app.get("/sales/onboarding/ui", include_in_schema=False)
+def ui_sales_onboarding_alias():
+    return _ui_to("/static/sales-onboarding.html")
+
+@app.get("/sales/assets/ui", include_in_schema=False)
+def ui_sales_assets_alias():
+    return _ui_to("/static/sales-assets.html")
+
+@app.get("/apply/sales", include_in_schema=False)
+def ui_sales_apply_alias():
+    return _ui_to("/static/sales-apply.html")
+
+@app.get("/apply/sales/invite", include_in_schema=False)
+def ui_sales_invite_alias():
+    return _ui_to("/static/sales-invite-accept.html")
+# ------- /UI aliases -------
 
 # ---------- Bulk upsert companies (+ optional seeds) ----------
 class SeedIn(BaseModel):
@@ -2317,7 +2343,7 @@ def create_profile(p: ProfileIn, request: Request):
     return row
 
 @app.get("/profiles", tags=["Profiles"], summary="List profiles")
-def list_profiles(
+def list_profiles(    
     q: Optional[str]=Query(None, description="Search by display_name/external_ref"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),

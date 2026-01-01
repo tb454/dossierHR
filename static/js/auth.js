@@ -1,86 +1,81 @@
 // /static/js/auth.js
 
-async function fetchJSON(url, opts = {}) {
-  const res = await fetch(url, {
-    credentials: 'include',
-    headers: { 'Accept': 'application/json', ...(opts.headers || {}) },
-    ...opts,
-  });
-  // Try to parse JSON even on error to read {detail:...}
-  let data = null;
-  try { data = await res.json(); } catch (_) {}
-  if (!res.ok) {
-    const msg = (data && (data.detail || data.error)) || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    err.data = data;
-    throw err;
-  }
-  return data ?? {};
-}
+(function () {
+  const DEFAULT_LOGIN = "/static/login.html";
 
-function onLoginPage() {
-  return location.pathname.endsWith('/static/login.html') || location.pathname.endsWith('/login.html');
-}
-
-// Returns { ok, email, role } or { ok:false } when not logged in
-async function getMe() {
-  try {
-    const me = await fetchJSON('/me');
-    if (!me || me.ok !== true || !me.role) return { ok: false };
-    return me;
-  } catch (e) {
-    if (e && (e.status === 401 || e.status === 403)) return { ok: false };
-    console.error('getMe failed:', e);
-    return { ok: false };
-  }
-}
-
-// Ensure the current user has one of the allowed roles.
-// If not logged in → go to login (but never bounce if you’re already on login).
-// If role exists but isn’t allowed → send them to their correct dashboard.
-async function requireRole(allowedRoles = []) {
-  const who = await getMe();
-  const role = who?.role;
-
-  // Not logged in
-  if (!who || who.ok !== true || !role) {
-    if (!onLoginPage()) location.href = '/static/login.html';
-    return null;
+  function normRole(r) {
+    return (r || "").toString().toLowerCase().replace(/-/g, "_");
   }
 
-  // Role not allowed -> bounce them to THEIR server-provided dashboard
-  if (Array.isArray(allowedRoles) && allowedRoles.length > 0 && !allowedRoles.includes(role)) {
-    const dest = who.redirect || '/dashboard/employee';
-    location.href = dest;
-    return null;
+  async function jsonFetch(path, opts = {}) {
+    const res = await fetch(path, {
+      credentials: "include",
+      headers: { "Accept": "application/json", ...(opts.headers || {}) },
+      ...opts,
+    });
+    return res;
   }
 
-  return who;
-}
+  async function me() {
+    const r = await jsonFetch("/me");
+    if (!r.ok) return { ok: false };
+    const j = await r.json();
+    return j && j.ok ? j : { ok: false };
+  }
 
-// Convenience: perform login and smart-redirect to the right dashboard
-async function login(email, password) {
-  const data = await fetchJSON('/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
+  async function login(email, password) {
+    const r = await jsonFetch("/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
 
-  // Server decides destination. No gotoDashboard() needed.
-  const dest = data.redirect || '/dashboard/employee';
-  location.href = dest;
-  return data;
-}
+    if (!r.ok) {
+      let msg = "Invalid credentials";
+      try {
+        const j = await r.json();
+        msg = j?.detail || j?.message || msg;
+      } catch {}
+      throw new Error(msg);
+    }
 
-// Convenience: logout and go back to login
-async function logout() {
-  try { await fetchJSON('/logout', { method: 'POST' }); } catch (_) {}
-  location.href = '/static/login.html';
-}
+    const data = await r.json();
+    const target = data?.redirect || "/static/employee.html";
+    location.href = target;
+    return data;
+  }
 
-// Export to window for inline handlers if you want:
-window.Auth = { getMe, requireRole, login, logout };
-window.getMe = getMe;
-window.requireRole = requireRole;
-window.logout = logout;
+  async function logout() {
+    try {
+      await jsonFetch("/logout", { method: "POST" });
+    } catch {}
+    location.href = DEFAULT_LOGIN;
+  }
+
+  // Client-side gate for pages
+  async function requireRole(allowedRoles) {
+    const who = await me();
+    if (!who.ok) {
+      location.href = DEFAULT_LOGIN;
+      return null;
+    }
+
+    const role = normRole(who.role);
+    const allowed = (allowedRoles || []).map(normRole);
+
+    if (allowed.length && !allowed.includes(role)) {
+      // logged in but wrong role → bounce to their real landing page
+      const target = who.redirect || "/static/employee.html";
+      location.href = target;
+      return null;
+    }
+
+    return who;
+  }
+
+  // expose
+  window.Auth = { me, login, logout, requireRole };
+
+  // Back-compat: admin.js calls requireRole(...) directly
+  window.requireRole = requireRole;
+})();

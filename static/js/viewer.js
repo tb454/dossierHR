@@ -1,8 +1,19 @@
-async function loadProfiles() {
-  const res = await fetch("/static/profiles.json");
-  if (!res.ok) throw new Error("Failed to load profiles.json");
+//viewer.js
+// Load profiles from backend (NOT a static json file)
+async function loadProfiles({ q = null, limit = 12, offset = 0 } = {}) {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+
+  const res = await fetch(`/profiles?${params.toString()}`, { credentials: "include" });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(txt || "Failed to load profiles");
+  }
   return await res.json();
 }
+
 
 function renderProfiles(profiles, container) {
   container.innerHTML = "";
@@ -51,3 +62,7 @@ function renderProfiles(profiles, container) {
     container.appendChild(card);
   });
 }
+
+// Expose helpers globally (admin.js calls them directly)
+window.loadProfiles = loadProfiles;
+window.renderProfiles = renderProfiles;
