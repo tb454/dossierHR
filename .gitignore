@@ -7,9 +7,6 @@
 *.pem
 *.p12
 .env.example
-# python junk (optional but nice)
-.venv/
-__pycache__/
-*.pyc
+
 
 
