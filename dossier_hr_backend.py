@@ -1046,7 +1046,7 @@ def list_house_queue(request: Request, q: Optional[str]=None, stage: Optional[st
         sql = "SELECT * FROM sales_leads WHERE rep_id IS NULL"
         vals = []
         if stage:
-            sql += " AND stage=%s"; vals.append(stage)
+            sql += " AND stage=%s"
             vals.append(stage)
         if q:
             sql += " AND (company_name ILIKE %s OR COALESCE(contact_name,'') ILIKE %s OR COALESCE(contact_email,'') ILIKE %s OR COALESCE(domain,'') ILIKE %s)"
@@ -1806,6 +1806,131 @@ def db():
     return psycopg.connect(DB_URL, autocommit=True, row_factory=dict_row)
 # ---- DB helper ----
 
+# ------ ingest scraper to raw entities ------
+def _sha256(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
+def _fingerprint_for_entity(entity_type: str, payload: dict, source_url: str) -> str:
+    """
+    Stable dedupe key.
+    Preference order:
+      domain -> phone_e164 -> website host -> contact_email domain -> source_url host -> name+city+state
+    """
+    p = payload or {}
+    dom = _extract_domain(p.get("domain")) or _extract_domain(p.get("website")) or _extract_domain(p.get("url")) or _extract_domain(p.get("contact_email"))
+    phone = (p.get("phone_e164") or p.get("phone") or "").strip()
+    host = _extract_domain(source_url)
+
+    name = (p.get("name") or p.get("company_name") or "").strip().lower()
+    city = (p.get("city") or "").strip().lower()
+    state = (p.get("state") or "").strip().lower()
+
+    key = None
+    if dom:
+        key = f"dom:{dom}"
+    elif phone:
+        key = f"ph:{phone}"
+    elif host:
+        key = f"host:{host}"
+    elif name:
+        key = f"name:{name}|{city}|{state}"
+    else:
+        key = f"fallback:{entity_type}|{source_url}"
+
+    return _sha256(f"{entity_type}|{key}")
+
+def _require_ingest_token(request: Request):
+    """
+    Allows scraper (non-session) pushes.
+    Header: X-Ingest-Token: <INGEST_WEBHOOK_SECRET>
+    """
+    if ENV != "production" and (INGEST_WEBHOOK_SECRET or "") == "dev_ingest":
+        # dev default: allow without token if you want; comment this out to force token
+        return True
+
+    tok = request.headers.get("X-Ingest-Token") or ""
+    if not INGEST_WEBHOOK_SECRET:
+        raise HTTPException(500, "INGEST_WEBHOOK_SECRET not configured")
+    if not hmac.compare_digest(tok, INGEST_WEBHOOK_SECRET):
+        raise HTTPException(401, "Invalid ingest token")
+    return True
+
+
+class IngestStartOut(BaseModel):
+    run_id: str
+    started_at: str
+    source: str
+
+
+@app.post("/admin/ingest/start", tags=["Admin","Scraper"], summary="Start an ingest run (admin)")
+def ingest_start(request: Request, source: str = Query("yard_crawler")):
+    require_admin(request)
+    run_id = str(uuid.uuid4())
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO ingest_runs (id, source, status)
+            VALUES (%s,%s,'running')
+        """, (run_id, source))
+        row = conn.execute("SELECT started_at FROM ingest_runs WHERE id=%s", (run_id,)).fetchone()
+    return IngestStartOut(run_id=run_id, started_at=str(row["started_at"]), source=source)
+
+
+class RawEntityIn(BaseModel):
+    entity_type: str = Field(pattern="^(company|contact|location)$")
+    source_url: Optional[str] = None
+    payload: dict
+
+
+class IngestPushIn(BaseModel):
+    run_id: str
+    source: Optional[str] = None
+    entities: List[RawEntityIn]
+
+
+@app.post("/ingest/raw_entities", tags=["Scraper"], summary="Push raw entities into raw_entities")
+def ingest_raw_entities(payload: IngestPushIn, request: Request):
+    _require_ingest_token(request)
+
+    inserted = 0
+    updated = 0
+
+    with db() as conn:
+        # validate run exists
+        run = conn.execute("SELECT id FROM ingest_runs WHERE id=%s", (payload.run_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, "run_id not found (call /admin/ingest/start or create ingest_runs row)")
+
+        for e in payload.entities:
+            src_url = e.source_url or ""
+            fp = _fingerprint_for_entity(e.entity_type, e.payload, src_url)
+
+            # use your upsert-y insert_raw_entity
+            before = conn.execute(
+                "SELECT id FROM raw_entities WHERE entity_type=%s AND fingerprint=%s",
+                (e.entity_type, fp)
+            ).fetchone()
+
+            rid = insert_raw_entity(conn, payload.run_id, e.entity_type, src_url, fp, e.payload)
+            if before:
+                updated += 1
+            else:
+                inserted += 1
+
+        # update ingest run stats
+        conn.execute("""
+            UPDATE ingest_runs
+            SET stats = jsonb_set(
+              COALESCE(stats,'{}'::jsonb),
+              '{raw_entities}',
+              to_jsonb(COALESCE((stats->>'raw_entities')::int,0) + %s),
+              true
+            )
+            WHERE id=%s
+        """, (inserted, payload.run_id))
+
+    return {"ok": True, "run_id": payload.run_id, "inserted": inserted, "updated": updated}
+# ------ ingest scraper to raw entities ------
+
 # ----- startup events -----
 @app.on_event("startup")
 def _startup_sales_tables():
@@ -2282,7 +2407,8 @@ def insert_raw_entity(conn, run_id, entity_type, source_url, fingerprint, payloa
                   fetched_at = now()
             returning id
         """, (row_id, run_id, entity_type, source_url, fingerprint, json.dumps(payload)))
-        return cur.fetchone()[0]
+        row = cur.fetchone()
+        return row["id"] if row else None
     
 def upsert_company(conn, payload: dict):
     company_id = str(uuid.uuid4())
@@ -2302,7 +2428,7 @@ def upsert_company(conn, payload: dict):
             cur.execute("select id from companies where domain=%s", (domain,))
             row = cur.fetchone()
             if row:
-                company_id = row[0]
+                company_id = row["id"]
 
         # upsert
         cur.execute("""
@@ -2320,7 +2446,8 @@ def upsert_company(conn, payload: dict):
             returning id
         """, (company_id,name,domain,phone,website,address1,city,state,postal))
 
-        return cur.fetchone()[0]
+        row = cur.fetchone()
+        return row["id"] if row else None
 
 def ensure_lead(conn, company_id: str):
     lead_id = str(uuid.uuid4())
@@ -2331,7 +2458,8 @@ def ensure_lead(conn, company_id: str):
           on conflict (company_id) do update set updated_at=now()
           returning id
         """, (lead_id, company_id))
-        return cur.fetchone()[0]
+        row = cur.fetchone()
+        return row["id"] if row else None
 
 def attach_source(conn, company_id, raw_entity_id, source, source_url):
     with conn.cursor() as cur:
@@ -2341,6 +2469,173 @@ def attach_source(conn, company_id, raw_entity_id, source, source_url):
           on conflict do nothing
         """, (company_id, raw_entity_id, source, source_url))
 
+def _sales_upsert_company_from_payload(conn, p: dict) -> str:
+    """
+    Upsert into sales_companies (CRM) using best available fields.
+    Returns sales_companies.id
+    """
+    name = (p.get("name") or p.get("company_name") or "").strip() or "Unknown"
+    website = (p.get("website") or p.get("url") or p.get("source_url") or "").strip() or None
+    dom = _extract_domain(p.get("domain")) or _extract_domain(website) or _extract_domain(p.get("contact_email"))
+
+    city = p.get("city")
+    state = p.get("state")
+    ctype = p.get("company_type") or p.get("type") or "yard"
+    notes = p.get("notes")
+
+    # 1) try by domain
+    row = None
+    if dom:
+        row = conn.execute("SELECT * FROM sales_companies WHERE domain=%s LIMIT 1", (dom,)).fetchone()
+
+    # 2) fallback by name+domain
+    if not row:
+        row = conn.execute(
+            "SELECT * FROM sales_companies WHERE lower(name)=lower(%s) AND COALESCE(domain,'')=COALESCE(%s,'') LIMIT 1",
+            (name, dom or "")
+        ).fetchone()
+
+    if row:
+        updated = conn.execute("""
+            UPDATE sales_companies
+            SET website=COALESCE(%s, website),
+                city=COALESCE(%s, city),
+                state=COALESCE(%s, state),
+                company_type=COALESCE(%s, company_type),
+                notes=COALESCE(%s, notes),
+                updated_at=NOW()
+            WHERE id=%s
+            RETURNING id
+        """, (website, city, state, ctype, notes, row["id"])).fetchone()
+        return str(updated["id"])
+
+    cid = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO sales_companies (id, name, domain, website, city, state, company_type, notes)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (cid, name, dom, website, city, state, ctype, notes))
+
+    # default ownership = house (NULL owner, house_account TRUE)
+    conn.execute("""
+        INSERT INTO sales_company_ownership (id, company_id, owner_rep_id, house_account, protection_expires_at, ownership_reason)
+        VALUES (%s,%s,NULL,TRUE,%s,%s)
+    """, (str(uuid.uuid4()), cid, datetime.utcnow() + timedelta(days=14), "normalized_house_seed"))
+
+    return cid
+
+
+def _ensure_house_sales_lead(conn, sales_company_id: str, p: dict) -> Optional[str]:
+    """
+    Create an unassigned (house queue) sales_leads row if not already present.
+    Returns lead_id or None if deduped.
+    """
+    website = (p.get("website") or p.get("url") or "").strip() or None
+    dom = _extract_domain(p.get("domain")) or _extract_domain(website) or _extract_domain(p.get("contact_email"))
+
+    # dedupe: avoid duplicate open house leads by domain
+    if dom:
+        dup = conn.execute("""
+            SELECT id
+            FROM sales_leads
+            WHERE rep_id IS NULL AND domain=%s AND stage NOT IN ('closed_won','closed_lost')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (dom,)).fetchone()
+        if dup:
+            return None
+
+    lead_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO sales_leads (
+          id, rep_id, company_id, company_name, domain, website, city, state,
+          company_type, lead_source, contact_name, contact_title, contact_email, contact_phone,
+          stage, notes, duplicate_of, linked_company_id
+        )
+        VALUES (%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,NULL,%s)
+    """, (
+        lead_id,
+        sales_company_id,
+        (p.get("name") or p.get("company_name") or "Unknown"),
+        dom,
+        website,
+        p.get("city"),
+        p.get("state"),
+        p.get("company_type") or p.get("type") or "yard",
+        p.get("lead_source") or "normalized",
+        p.get("contact_name"),
+        p.get("contact_title"),
+        p.get("contact_email"),
+        p.get("contact_phone") or p.get("phone_e164") or p.get("phone"),
+        p.get("notes"),
+        sales_company_id
+    ))
+    return lead_id
+
+
+@app.post("/admin/normalize/run", tags=["Admin","Scraper"], summary="Normalize raw_entities into Sales House Queue")
+def normalize_run_to_house_queue(request: Request, run_id: str = Query(..., description="ingest_runs.id")):
+    require_admin(request)
+
+    created_companies = 0
+    created_house_leads = 0
+    skipped = 0
+
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        rows = conn.execute("""
+            SELECT id, entity_type, source_url, payload
+            FROM raw_entities
+            WHERE run_id=%s
+            ORDER BY fetched_at ASC
+        """, (run_id,)).fetchall()
+
+        for r in rows:
+            if r["entity_type"] not in ("company", "location"):
+                skipped += 1
+                continue
+
+            # payload may already be dict (psycopg jsonb) or string
+            p = r["payload"]
+            if isinstance(p, str):
+                try:
+                    p = json.loads(p)
+                except Exception:
+                    p = {"raw": p}
+
+            # 1) (optional) canonical company spine
+            try:
+                canon_company_id = upsert_company(conn, {
+                    "name": p.get("name") or p.get("company_name"),
+                    "domain": _extract_domain(p.get("domain")) or _extract_domain(p.get("website")) or _extract_domain(p.get("contact_email")),
+                    "phone_e164": p.get("phone_e164"),
+                    "website": p.get("website"),
+                    "address1": p.get("address1"),
+                    "city": p.get("city"),
+                    "state": p.get("state"),
+                    "postal": p.get("postal"),
+                })
+                attach_source(conn, canon_company_id, r["id"], "raw_entities", r.get("source_url"))
+                ensure_lead(conn, canon_company_id)
+            except Exception:
+                # don't block sales CRM if spine insert fails
+                pass
+
+            # 2) sales CRM company + house lead
+            sales_company_id = _sales_upsert_company_from_payload(conn, p)
+            created_companies += 1
+
+            lead_id = _ensure_house_sales_lead(conn, sales_company_id, p)
+            if lead_id:
+                created_house_leads += 1
+
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "sales_companies_touched": created_companies,
+        "house_leads_created": created_house_leads,
+        "skipped": skipped
+    }
 # -------- insert_raw_entity -----------
 
 # -------- Reviews (with moderation pipeline) ---------
