@@ -189,12 +189,21 @@ def parse_company(doc:HTMLParser, url:str)->Dict:
     phones = extract_phones(text)
 
     # social links
-    socials={}
+    socials = {}
     for a in doc.css("a[href]"):
-        href=a.attributes.get("href","")
-        for dom,label in SOC_KWS.items():
+        href = a.attributes.get("href")
+
+        # Selectolax can return None for href; also ignore empty/non-string values
+        if not href or not isinstance(href, str):
+            continue
+
+        href = href.strip()
+        if not href:
+            continue
+
+        for dom, label in SOC_KWS.items():
             if dom in href:
-                socials[label]=href
+                socials[label] = href
 
     # schema.org
     data = extract_schema(doc.html or "", url)
