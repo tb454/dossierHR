@@ -576,25 +576,23 @@ async def scrape_az_dps_stores(client) -> List[Dict]:
     await asyncio.gather(*(worker(n, c) for (n, c) in deduped))
     return out
 
-async def scrape_openweb_search(client, states:List[str])->List[Dict]:
-    rows=[]
-    ddg_pages = int(os.getenv("SEED_DDG_PAGES", "2"))  # default DOWN from 5 to avoid bans
+async def scrape_openweb_search(client, states: List[str]) -> List[Dict]:
+    rows: List[Dict] = []
+    ddg_pages = int(os.getenv("SEED_DDG_PAGES", "2"))  # default down to reduce bans
 
     for st in states:
-        st = st.upper()
+        st = st.upper().strip()
         st_count = 0
         tokens = STATE_TOKENS.get(st, [st])
 
         for term in SEARCH_TERMS:
             if st_count >= MAX_SITES_PER_STATE:
                 break
-        for tok in tokens:
-            if st_count >= MAX_SITES_PER_STATE:
-                break
+
             for tok in tokens:
                 if st_count >= MAX_SITES_PER_STATE:
                     break
-            
+
                 q = f"{term} {tok}"
                 hits = await ddg_search(client, q, max_pages=ddg_pages)
 
@@ -607,7 +605,7 @@ async def scrape_openweb_search(client, states:List[str])->List[Dict]:
                         continue
 
                     rows.append({
-                        "Name": site.replace("https://",""),
+                        "Name": site.replace("https://", ""),
                         "Website": site,
                         "Region": STATE_TO_REGION.get(st, ""),
                         "Source": f"search:ddg:{st}:{tok}"
@@ -654,7 +652,7 @@ async def build_master_seeds(extra_csv=None, out_csv="seeds_all.csv", states_fil
 
         for b in batches:
             if isinstance(b, Exception): 
-                continue
+                raise b
             rows.extend(b)
 
     # merge with any existing seeds you have
