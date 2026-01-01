@@ -20,7 +20,7 @@ from pydantic import AnyUrl, BaseModel, Field
 import bcrypt
 import psycopg
 from psycopg.rows import dict_row
-
+from scraper_core import PoliteSyncCrawler
 from scraper_router import router as scraper_router
 from leads_ingest_router import router as leads_ingest_router
 from sales_leads_router import router as sales_leads_router
@@ -144,7 +144,7 @@ def ensure_sales_tables(conn):
 
     CREATE TABLE IF NOT EXISTS sales_rep_plan_acceptance (
       id UUID PRIMARY KEY,
-      rep_id UUID NOT NULL,
+      rep_id UUID NULL, -- NULL = house queue (unclaimed)
       plan_version TEXT NOT NULL,
       accepted_at TIMESTAMP NOT NULL DEFAULT NOW(),
       ip TEXT NULL,
@@ -249,6 +249,26 @@ def ensure_sales_tables(conn):
     CREATE INDEX IF NOT EXISTS idx_sales_leads_domain ON sales_leads(domain);
     CREATE INDEX IF NOT EXISTS idx_sales_leads_company_id ON sales_leads(company_id);
     CREATE INDEX IF NOT EXISTS idx_sales_leads_followup ON sales_leads(next_follow_up_at);
+
+    -- ---- house-queue + claim migration (safe to run repeatedly) ----
+    ALTER TABLE sales_leads
+      ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP NULL;
+
+    ALTER TABLE sales_leads
+      ADD COLUMN IF NOT EXISTS claimed_by_email TEXT NULL;
+
+    -- If this DB was created earlier with rep_id NOT NULL, drop the constraint safely.
+    DO $$
+    BEGIN
+      BEGIN
+        ALTER TABLE sales_leads ALTER COLUMN rep_id DROP NOT NULL;
+      EXCEPTION WHEN others THEN
+        -- already nullable or not present; ignore
+      END;
+    END $$;
+
+    -- Optional: partial index for house queue scans
+    CREATE INDEX IF NOT EXISTS idx_sales_leads_house_queue ON sales_leads(created_at DESC) WHERE rep_id IS NULL;
 
     -- activities (calls/emails/notes) with optional follow-up
     CREATE TABLE IF NOT EXISTS sales_activities (
@@ -942,14 +962,171 @@ def create_lead(payload: LeadCreateIn, request: Request):
                      (None, json.dumps({"lead_id": lead_id, "rep_id": str(rep["id"]), "company": payload.company_name})))
 
     return {"ok": True, "lead": row, "duplicate_of": duplicate_of}
+# --------------------------
+
+# ------- House Queue (unassigned leads) + Claim -------
+class HouseLeadIn(BaseModel):
+    company_name: str = Field(min_length=1)
+    website: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    company_type: str = Field(default="yard")
+    lead_source: Optional[str] = "house_queue"
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    notes: Optional[str] = None
+
+@app.post("/admin/sales/leads/house_import", tags=["Admin","Sales"], summary="Import leads into House Queue (unassigned)")
+def house_import(leads: List[HouseLeadIn], request: Request):
+    require_admin(request)
+    added = 0
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        for payload in leads:
+            dom = _extract_domain(payload.contact_email) or _extract_domain(payload.website)
+
+            # Upsert company (by domain preferred)
+            comp = conn.execute("SELECT * FROM sales_companies WHERE domain=%s LIMIT 1", (dom,)).fetchone() if dom else None
+            if not comp:
+                # try by name+domain
+                comp = conn.execute(
+                    "SELECT * FROM sales_companies WHERE lower(name)=lower(%s) AND COALESCE(domain,'')=COALESCE(%s,'') LIMIT 1",
+                    (payload.company_name, dom or "")
+                ).fetchone()
+
+            if not comp:
+                comp_id = str(uuid.uuid4())
+                comp = conn.execute("""
+                    INSERT INTO sales_companies (id, name, domain, website, city, state, company_type, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING *
+                """, (comp_id, payload.company_name, dom, payload.website, payload.city, payload.state, payload.company_type, payload.notes)).fetchone()
+
+                # House ownership row (owner_rep_id NULL, house_account TRUE)
+                conn.execute("""
+                    INSERT INTO sales_company_ownership (id, company_id, owner_rep_id, house_account, protection_expires_at, ownership_reason)
+                    VALUES (%s,%s,NULL,TRUE,%s,%s)
+                """, (str(uuid.uuid4()), comp_id, datetime.utcnow() + timedelta(days=14), "house_queue_seed"))
+
+            # Avoid duplicate open leads in house queue by domain
+            if dom:
+                dup = conn.execute("""
+                    SELECT id FROM sales_leads
+                    WHERE rep_id IS NULL AND domain=%s AND stage NOT IN ('closed_won','closed_lost')
+                    ORDER BY created_at DESC LIMIT 1
+                """, (dom,)).fetchone()
+                if dup:
+                    continue
+
+            lead_id = str(uuid.uuid4())
+            conn.execute("""
+                INSERT INTO sales_leads (
+                  id, rep_id, company_id, company_name, domain, website, city, state,
+                  company_type, lead_source, contact_name, contact_title, contact_email, contact_phone,
+                  stage, notes, duplicate_of, linked_company_id
+                )
+                VALUES (%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,NULL,%s)
+            """, (
+                lead_id, comp["id"], payload.company_name, dom, payload.website, payload.city, payload.state,
+                payload.company_type, payload.lead_source, payload.contact_name, payload.contact_title, payload.contact_email, payload.contact_phone,
+                payload.notes, comp["id"]
+            ))
+            added += 1
+
+    return {"ok": True, "added": added}
+
+@app.get("/sales/house_queue", tags=["Sales"], summary="List House Queue leads (unclaimed)")
+def list_house_queue(request: Request, q: Optional[str]=None, stage: Optional[str]=None, limit: int = Query(50, ge=1, le=50)):
+    _ = require_sales_rep(request)
+    with db() as conn:
+        ensure_sales_tables(conn)
+        sql = "SELECT * FROM sales_leads WHERE rep_id IS NULL"
+        vals = []
+        if stage:
+            sql += " AND stage=%s"; vals.append(stage)
+            vals.append(stage)
+        if q:
+            sql += " AND (company_name ILIKE %s OR COALESCE(contact_name,'') ILIKE %s OR COALESCE(contact_email,'') ILIKE %s OR COALESCE(domain,'') ILIKE %s)"
+            vals.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
+        sql += " ORDER BY created_at DESC LIMIT %s"
+        vals.append(limit)
+        rows = conn.execute(sql, tuple(vals)).fetchall()
+    return {"ok": True, "leads": rows}
+
+@app.post("/sales/house_queue/{lead_id}/claim", tags=["Sales"], summary="Claim a House Queue lead (atomic)")
+def claim_house_lead(lead_id: str, request: Request):
+    rep = require_sales_rep(request)
+
+    with db() as conn:
+        ensure_sales_tables(conn)
+
+        # Enforce max 50 active leads per rep (prevents hoarding)
+        active = conn.execute("""
+            SELECT COUNT(*)::int AS cnt
+            FROM sales_leads
+            WHERE rep_id=%s AND stage NOT IN ('closed_won','closed_lost')
+        """, (rep["id"],)).fetchone()["cnt"]
+
+        if active >= 50:
+            raise HTTPException(409, "Lead limit reached (50 active). Close/win/lose some leads before claiming more.")
+
+        # Atomic claim: only succeeds if rep_id is still NULL
+        row = conn.execute("""
+            UPDATE sales_leads
+            SET rep_id=%s,
+                claimed_at=NOW(),
+                claimed_by_email=%s,
+                protection_expires_at=(NOW() + INTERVAL '14 days'),
+                updated_at=NOW()
+            WHERE id=%s AND rep_id IS NULL
+            RETURNING *
+        """, (rep["id"], (rep.get("email") or "").lower().strip(), lead_id)).fetchone()
+
+        if not row:
+            raise HTTPException(409, "Already claimed (or not in house queue)")
+
+        company_id = row.get("company_id") or row.get("linked_company_id")
+        if company_id:
+            # close any existing open ownership record (house or previous)
+            conn.execute("""
+                UPDATE sales_company_ownership
+                SET ownership_end=NOW()
+                WHERE company_id=%s AND ownership_end IS NULL
+            """, (company_id,))
+
+            # assign ownership to claiming rep
+            conn.execute("""
+                INSERT INTO sales_company_ownership (id, company_id, owner_rep_id, house_account, protection_expires_at, ownership_reason)
+                VALUES (%s,%s,%s,FALSE,%s,%s)
+            """, (str(uuid.uuid4()), company_id, rep["id"], datetime.utcnow() + timedelta(days=14), "house_queue_claim"))
+
+            # audit
+            conn.execute("""
+                INSERT INTO sales_ownership_audit (id, entity_type, entity_id, action, from_rep_id, to_rep_id, reason, actor_email)
+                VALUES (%s,'lead',%s,'claim',NULL,%s,%s,%s)
+            """, (str(uuid.uuid4()), lead_id, rep["id"], "claimed from house queue", (rep.get("email") or "")))
+
+            conn.execute("""
+                INSERT INTO sales_ownership_audit (id, entity_type, entity_id, action, from_rep_id, to_rep_id, reason, actor_email)
+                VALUES (%s,'company',%s,'assign',NULL,%s,%s,%s)
+            """, (str(uuid.uuid4()), company_id, rep["id"], "ownership assigned via claim", (rep.get("email") or "")))
+
+    return {"ok": True, "lead": row}
 
 @app.get("/sales/leads", tags=["Sales"], summary="List my leads")
 def list_leads(request: Request, q: Optional[str]=None, stage: Optional[str]=None, limit: int = Query(200, ge=1, le=2000)):
     rep = require_sales_rep(request)
     with db() as conn:
         ensure_sales_tables(conn)
-        sql = "SELECT * FROM sales_leads WHERE rep_id=%s"
-        vals = [rep["id"]]
+        sql = "SELECT * FROM sales_leads WHERE 1=1"
+        vals = []
+
+        if rep["role"] == "sales_rep":
+            sql += " AND rep_id=%s"
+            vals.append(rep["id"])
         if stage:
             sql += " AND stage=%s"; vals.append(stage)
         if q:
@@ -2030,7 +2207,7 @@ def verify_profile_website(profile_id: str, request: Request, max_pages: int = Q
 
     # 2) create a scrape task and run inline (small scope) to produce an immediate signal
     #    (for larger scale use /scraper/tasks to run in background)
-    from scraper_core import PoliteSyncCrawler
+    
     crawler = PoliteSyncCrawler()
 
     seed = prof["external_ref"]
@@ -2091,6 +2268,80 @@ def verify_profile_website(profile_id: str, request: Request, max_pages: int = Q
     except Exception as e:
         raise HTTPException(500, f"verification failed: {e}")
 # ------- Profiles -----------
+
+# -------- insert_raw_entity -----------
+def insert_raw_entity(conn, run_id, entity_type, source_url, fingerprint, payload: dict):
+    row_id = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("""
+            insert into raw_entities (id, run_id, entity_type, source_url, fingerprint, payload)
+            values (%s,%s,%s,%s,%s,%s::jsonb)
+            on conflict (entity_type, fingerprint) do update
+              set payload = excluded.payload,
+                  source_url = excluded.source_url,
+                  fetched_at = now()
+            returning id
+        """, (row_id, run_id, entity_type, source_url, fingerprint, json.dumps(payload)))
+        return cur.fetchone()[0]
+    
+def upsert_company(conn, payload: dict):
+    company_id = str(uuid.uuid4())
+
+    name = payload.get("name")
+    domain = (payload.get("domain") or "").lower() or None
+    phone = payload.get("phone_e164")
+    website = payload.get("website")
+    address1 = payload.get("address1")
+    city = payload.get("city")
+    state = payload.get("state")
+    postal = payload.get("postal")
+
+    with conn.cursor() as cur:
+        # match by domain first (strongest)
+        if domain:
+            cur.execute("select id from companies where domain=%s", (domain,))
+            row = cur.fetchone()
+            if row:
+                company_id = row[0]
+
+        # upsert
+        cur.execute("""
+            insert into companies (id,name,domain,phone_e164,website,address1,city,state,postal,updated_at)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
+            on conflict (domain) do update set
+              name=coalesce(excluded.name, companies.name),
+              phone_e164=coalesce(excluded.phone_e164, companies.phone_e164),
+              website=coalesce(excluded.website, companies.website),
+              address1=coalesce(excluded.address1, companies.address1),
+              city=coalesce(excluded.city, companies.city),
+              state=coalesce(excluded.state, companies.state),
+              postal=coalesce(excluded.postal, companies.postal),
+              updated_at=now()
+            returning id
+        """, (company_id,name,domain,phone,website,address1,city,state,postal))
+
+        return cur.fetchone()[0]
+
+def ensure_lead(conn, company_id: str):
+    lead_id = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("""
+          insert into leads (id, company_id)
+          values (%s,%s)
+          on conflict (company_id) do update set updated_at=now()
+          returning id
+        """, (lead_id, company_id))
+        return cur.fetchone()[0]
+
+def attach_source(conn, company_id, raw_entity_id, source, source_url):
+    with conn.cursor() as cur:
+        cur.execute("""
+          insert into company_sources (company_id, raw_entity_id, source, source_url)
+          values (%s,%s,%s,%s)
+          on conflict do nothing
+        """, (company_id, raw_entity_id, source, source_url))
+
+# -------- insert_raw_entity -----------
 
 # -------- Reviews (with moderation pipeline) ---------
 BANNED_WORDS = {"kill","die","tranny","slur1","slur2"}  # minimal example
