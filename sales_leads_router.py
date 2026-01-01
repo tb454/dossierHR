@@ -111,7 +111,10 @@ async def crawl_run(
                 cur.execute("""
                   select host, coalesce(name_seed, root) as name, root
                   from sales_sites
-                  where crawl_status in ('new','queued','error') and region=%s
+                  where (
+                    crawl_status in ('new','error')
+                    or (crawl_status='queued' and updated_at < now() - interval '30 minutes')
+                  ) and region=%s
                   order by updated_at asc
                   limit %s
                 """, (region, limit))
@@ -119,7 +122,10 @@ async def crawl_run(
                 cur.execute("""
                   select host, coalesce(name_seed, root) as name, root
                   from sales_sites
-                  where crawl_status in ('new','queued','error')
+                  where (
+                    crawl_status in ('new','error')
+                    or (crawl_status='queued' and updated_at < now() - interval '30 minutes')
+                  )
                   order by updated_at asc
                   limit %s
                 """, (limit,))
