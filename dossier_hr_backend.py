@@ -2043,15 +2043,18 @@ def require_manager_or_admin(req: Request):
 
 def redirect_for_role(r: str) -> str:
     r = (r or "").strip().lower().replace("-", "_")
+
+    # Pure static UI (no /dashboard routes)
     if r == "admin":
-        return "/dashboard/admin"
+        return "/static/admin.html"
     if r == "manager":
-        return "/dashboard/manager"
+        return "/static/manager.html"
     if r == "sales_manager":
-        return "/dashboard/sales-manager"
+        return "/static/sales-manager.html"
     if r in ("sales_rep", "sdr"):
-        return "/dashboard/sales"
-    return "/dashboard/employee"
+        return "/static/sales-portal.html"
+    return "/static/employee.html"
+
 
 # -------- Health -----------
 @app.get("/health", tags=["System"], summary="Healthcheck")

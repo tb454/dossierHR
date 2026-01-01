@@ -81,3 +81,6 @@ async function logout() {
 
 // Export to window for inline handlers if you want:
 window.Auth = { getMe, requireRole, login, logout };
+window.getMe = getMe;
+window.requireRole = requireRole;
+window.logout = logout;
