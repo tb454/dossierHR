@@ -514,80 +514,7 @@ def require_sales_manager(request: Request):
     return True
 # --------------------------
 
-# ------ UI routes (serve static pages, CSP-safe) -----
-def _serve_sales_html(filename: str) -> HTMLResponse:
-    p = STATIC_DIR / filename
-    if not p.exists():
-        raise HTTPException(404, "Page not found")
-    return HTMLResponse(p.read_text(encoding="utf-8"))
-
-@app.get("/apply/sales", tags=["UI"], summary="Public sales rep application page")
-def ui_sales_apply():
-    return _serve_sales_html("sales-apply.html")
-
-@app.get("/apply/sales/invite", tags=["UI"], summary="Invite accept page (token)")
-def ui_sales_invite_accept():
-    return _serve_sales_html("sales-invite-accept.html")
-
-@app.get("/dashboard/sales", tags=["UI"], summary="Sales portal")
-def ui_sales_portal(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep","sales_manager","admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    
-    return _serve_sales_html("sales-portal.html")
-@app.get("/dashboard/sales-manager", tags=["UI"], summary="Sales manager dashboard (role-gated)")
-def ui_sales_manager_dash(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_manager", "admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-manager.html")
-
-@app.get("/sales/leads/ui", tags=["UI"], summary="Leads UI")
-def ui_sales_leads(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep","sales_manager","admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-leads.html")
-
-@app.get("/sales/deals/ui", tags=["UI"], summary="Deals UI")
-def ui_sales_deals(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep","sales_manager","admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-deals.html")
-
-@app.get("/sales/onboarding/ui", tags=["UI"], summary="Onboarding UI")
-def ui_sales_onboarding(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep","sales_manager","admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-onboarding.html")
-
-@app.get("/sales/assets/ui", tags=["UI"], summary="Assets UI")
-def ui_sales_assets(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_rep","sales_manager","admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-assets.html")
-
-@app.get("/sales/admin/ui", tags=["UI"], summary="Sales admin UI")
-def ui_sales_admin(request: Request):
-    role = request.session.get("role")
-    if role not in ("admin","sales_manager"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-admin.html")
-
-@app.get("/sales/manager/ui", tags=["UI"], summary="Sales manager UI")
-def ui_sales_manager_ui(request: Request):
-    role = request.session.get("role")
-    if role not in ("sales_manager","admin"):
-        return RedirectResponse("/static/login.html", status_code=302)
-    return _serve_sales_html("sales-manager.html")
-
-# --------------------------
-# Rep onboarding: open apply + admin approve + invite accept
-# --------------------------
+# ------ Rep onboarding: open apply + admin approve + invite accept ------
 class SalesApplyIn(BaseModel):
     legal_name: str = Field(min_length=1)
     email: str = Field(min_length=3)
@@ -2343,12 +2270,14 @@ def create_profile(p: ProfileIn, request: Request):
     return row
 
 @app.get("/profiles", tags=["Profiles"], summary="List profiles")
-def list_profiles(    
+def list_profiles(
+    request: Request,
     q: Optional[str]=Query(None, description="Search by display_name/external_ref"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    sql = "SELECT * FROM profiles WHERE deleted_at IS NULL"
+    require_manager_or_admin(request)
+    sql = "SELECT id, display_name, external_ref, picture_url, created_at, deleted_at FROM profiles WHERE deleted_at IS NULL"
     vals = []
     if q:
         sql += " AND (display_name ILIKE %s OR external_ref ILIKE %s)"
